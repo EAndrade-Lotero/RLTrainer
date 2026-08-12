@@ -1,5 +1,6 @@
-Flask>=3.0.0
-gymnasium[classic-control]>=0.29.0
-numpy>=1.24.0
-Pillow>=10.0.0
-termcolor>=2.0.0
+Flask>=3.0
+numpy>=1.26
+chess>=1.11
+gymnasium>=0.29
+stable-baselines3>=2.3
+torch>=2.0

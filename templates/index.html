@@ -1,34 +1,170 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="es">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RL Trainer</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Telemetría RL</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
-  <h1 class="page-title">General Page</h1>
 
-  <div class="app-shell">
-    <aside class="sidebar">
-      <p class="brand">RL Trainer</p>
-      <nav>
-        <ul>
-          <li><a href="{{ url_for('load') }}">Load environment and agent</a></li>
-          <li><a href="{{ url_for('visualize_environment') }}">Visualize environment</a></li>
-          <li><a href="{{ url_for('visualize_q_table') }}">Visualize Q-table</a></li>
-          <li><a href="{{ url_for('training') }}">Training</a></li>
-        </ul>
-      </nav>
-    </aside>
+<div class="app">
 
-    <main class="content">
-      <h2>Welcome!</h2>
-      <p>
-        This application allows for the visualization of reinforcement learning
-        agents in different environments.
-      </p>
-    </main>
-  </div>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">◈</span>
+      <div class="brand-text">
+        <h1>Telemetría&nbsp;RL</h1>
+        <span class="brand-sub">seguimiento de entorno y agente</span>
+      </div>
+    </div>
+
+    <div class="transport">
+      <button id="btn-start" class="btn btn-primary">▶ Iniciar</button>
+      <button id="btn-pause" class="btn">⏸ Pausar</button>
+      <button id="btn-reset" class="btn btn-danger">↺ Reiniciar</button>
+      <div class="speed-control">
+        <label for="speed">velocidad</label>
+        <input type="range" id="speed" min="1" max="60" value="8">
+        <span id="speed-value">8 pasos/s</span>
+      </div>
+      <div class="status-pill" id="status-pill">
+        <span class="dot"></span>
+        <span id="status-text">en pausa</span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="env">01 · Entorno</button>
+    <button class="tab-btn" data-tab="agent">02 · Agente</button>
+  </nav>
+
+  <main class="content">
+
+    <!-- ================= PESTAÑA ENTORNO ================= -->
+    <section id="tab-env" class="panel active">
+      <div class="env-layout">
+
+        <div class="scope">
+          <div class="scope-header">
+            <span>KRK · REY + TORRE VS REY</span>
+            <span id="env-dims" class="scope-sub">posición 1 · blancas</span>
+          </div>
+          <div id="chess-board" class="chess-board" aria-label="Tablero KRK"></div>
+          <div class="legend">
+            <span><i class="sw sw-white"></i>blancas (K+R)</span>
+            <span><i class="sw sw-black"></i>negras (K)</span>
+            <span><i class="sw sw-check"></i>jaque</span>
+            <span id="env-status-hint">en juego</span>
+          </div>
+        </div>
+
+        <aside class="side-readout">
+          <div class="readout-card">
+            <span class="readout-label">episodio actual</span>
+            <span class="readout-value" id="ro-episode">0</span>
+          </div>
+          <div class="readout-card">
+            <span class="readout-label">ply / máx</span>
+            <span class="readout-value" id="ro-steps">0 / 0</span>
+          </div>
+          <div class="readout-card">
+            <span class="readout-label">recompensa episodio</span>
+            <span class="readout-value" id="ro-ep-reward">0.00</span>
+          </div>
+          <div class="readout-card">
+            <span class="readout-label">última jugada</span>
+            <span class="readout-value" id="ro-action">—</span>
+          </div>
+          <div class="readout-card">
+            <span class="readout-label">turno</span>
+            <span class="readout-value" id="ro-turn">blancas</span>
+          </div>
+          <div class="readout-card">
+            <span class="readout-label">modo</span>
+            <span class="readout-value" id="ro-mode">—</span>
+          </div>
+
+          <div class="config-card">
+            <span class="readout-label">posición inicial KRK</span>
+            <div class="config-row">
+              <input type="range" id="cfg-position" min="1" max="9" value="1">
+              <span id="cfg-position-value">1</span>
+            </div>
+            <span class="readout-label">lado que mueve primero</span>
+            <div class="config-row">
+              <select id="cfg-side" class="cfg-select">
+                <option value="white" selected>blancas</option>
+                <option value="black">negras</option>
+              </select>
+            </div>
+            <button id="btn-apply-config" class="btn btn-block">aplicar y reiniciar</button>
+          </div>
+        </aside>
+
+      </div>
+    </section>
+
+    <!-- ================= PESTAÑA AGENTE ================= -->
+    <section id="tab-agent" class="panel">
+      <div class="agent-layout">
+
+        <div class="stat-grid">
+          <div class="stat-card">
+            <span class="readout-label">episodios completados</span>
+            <span class="readout-value" id="st-episode">0</span>
+          </div>
+          <div class="stat-card">
+            <span class="readout-label">learning rate (A2C)</span>
+            <span class="readout-value accent-amber" id="st-epsilon">0.000700</span>
+          </div>
+          <div class="stat-card">
+            <span class="readout-label">recompensa media (50)</span>
+            <span class="readout-value accent-blue" id="st-avg-reward">0.00</span>
+          </div>
+          <div class="stat-card">
+            <span class="readout-label">mejor recompensa</span>
+            <span class="readout-value accent-green" id="st-best-reward">0.00</span>
+          </div>
+          <div class="stat-card">
+            <span class="readout-label">pérdida política (ema)</span>
+            <span class="readout-value" id="st-td-error">0.0000</span>
+          </div>
+          <div class="stat-card">
+            <span class="readout-label">pasos totales</span>
+            <span class="readout-value" id="st-total-steps">0</span>
+          </div>
+        </div>
+
+        <div class="charts-grid">
+          <div class="chart-card">
+            <span class="chart-title">recompensa por episodio</span>
+            <canvas id="chart-reward"></canvas>
+          </div>
+          <div class="chart-card">
+            <span class="chart-title">pasos por episodio</span>
+            <canvas id="chart-steps"></canvas>
+          </div>
+          <div class="chart-card">
+            <span class="chart-title">pérdida política (por episodio)</span>
+            <canvas id="chart-epsilon"></canvas>
+          </div>
+          <div class="chart-card">
+            <span class="chart-title">mapa de valor V(s) (A2C)</span>
+            <canvas id="qheatmap" width="360" height="360"></canvas>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
 </body>
 </html>
