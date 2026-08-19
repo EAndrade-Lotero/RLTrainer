@@ -36,7 +36,7 @@
             <option value="Blackjack-v1">Blackjack</option>
             <option value="Taxi-v3">Taxi</option>
             <option value="FrozenLake-v1">Frozen Lake</option>
-            <option value="CliffWalking-v0">Cliff Walking</option>
+            <option value="CliffWalking-v1">Cliff Walking</option>
           </optgroup>
           <optgroup label="Classic Control">
             <option value="Acrobot-v1">Acrobot</option>
@@ -142,6 +142,9 @@
       <button type="submit" class="btn btn--primary" id="save-selections">
         Apply configuration
       </button>
+      <button type="button" class="btn btn--secondary" id="load-configuration">
+        Load configuration
+      </button>
       <button type="button" class="btn btn--secondary" id="reset-defaults">
         Reset defaults
       </button>
@@ -154,6 +157,29 @@
       ></div>
     </div>
   </form>
+
+  <dialog class="setup-dialog" id="load-agent-dialog" aria-labelledby="load-agent-dialog-title">
+    <form method="dialog" class="setup-dialog__form" id="load-agent-form">
+      <header class="setup-dialog__header">
+        <h2 class="setup-dialog__title" id="load-agent-dialog-title">Load configuration</h2>
+        <p class="setup-dialog__subtitle">
+          Choose an agent file from <code>saved_agents</code>.
+        </p>
+      </header>
+      <div class="setup-field">
+        <label class="label" for="load-agent-select">Saved agent</label>
+        <select id="load-agent-select" class="select" required></select>
+      </div>
+      <div class="setup-dialog__actions">
+        <button type="submit" class="btn btn--primary" value="confirm" id="load-agent-confirm">
+          Load
+        </button>
+        <button type="submit" class="btn btn--secondary" value="cancel">
+          Cancel
+        </button>
+      </div>
+    </form>
+  </dialog>
 {% endblock %}
 
 {% block scripts %}
@@ -210,6 +236,13 @@
       }
     }
 
+    function markConfiguring() {
+      setStatus("", null);
+      if (window.ExperimentContext) {
+        ExperimentContext.setStatus("configuring", "Configuring");
+      }
+    }
+
     function setFieldError(input, errorEl, message) {
       const invalid = Boolean(message);
       input.classList.toggle("input--invalid", invalid);
@@ -250,6 +283,37 @@
       return !learningRateMessage && !explorationMessage;
     }
 
+    async function promptSaveAgent() {
+      const response = await fetch("{{ url_for('api_agent_export') }}", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+
+      if (response.status === 404) {
+        return { saved: false, skipped: true };
+      }
+
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (error) {
+        data = {};
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error || "Could not save the agent.");
+      }
+
+      return {
+        saved: true,
+        skipped: false,
+        path: data.path,
+        filename: data.filename,
+        kind: data.kind,
+      };
+    }
+
     async function saveConfig(event) {
       if (event) {
         event.preventDefault();
@@ -257,6 +321,17 @@
 
       if (!validateForm()) {
         setStatus("Please fix the highlighted fields before applying.", "error");
+        if (window.ExperimentContext) {
+          ExperimentContext.setStatus("error", "Error");
+        }
+        return;
+      }
+
+      let saveResult = { saved: false, skipped: true };
+      try {
+        saveResult = await promptSaveAgent();
+      } catch (error) {
+        setStatus(error.message || "Could not save the agent.", "error");
         if (window.ExperimentContext) {
           ExperimentContext.setStatus("error", "Error");
         }
@@ -289,7 +364,13 @@
         ExperimentContext.setAgent(data.agent, data.agent_label);
         ExperimentContext.setStatus("ready", "Ready");
       }
-      setStatus("Configuration applied. It is ready to use in Visualization and Training.", "success");
+      const saveNote = saveResult.saved
+        ? ` Agent saved to ${saveResult.path}. `
+        : " ";
+      setStatus(
+        `Configuration applied.${saveNote}It is ready to use in Visualization and Training.`,
+        "success"
+      );
     }
 
     async function resetDefaults() {
@@ -325,19 +406,18 @@
     applyConfig(savedConfig);
     environmentSelect.addEventListener("change", () => {
       updateHyperparameters();
-      setStatus("", null);
       if (window.ExperimentContext) {
         const selected = environmentSelect.options[environmentSelect.selectedIndex];
         ExperimentContext.setEnvironment(environmentSelect.value, selected ? selected.textContent : environmentSelect.value);
-        ExperimentContext.setStatus("configuring", "Configuring");
       }
+      markConfiguring();
     });
     agentSelect.addEventListener("change", () => {
       if (window.ExperimentContext) {
         const selected = agentSelect.options[agentSelect.selectedIndex];
         ExperimentContext.setAgent(agentSelect.value, selected ? selected.textContent.trim() : agentSelect.value);
-        ExperimentContext.setStatus("configuring", "Configuring");
       }
+      markConfiguring();
     });
     learningRateInput.addEventListener("input", () => {
       setFieldError(
@@ -345,6 +425,7 @@
         learningRateError,
         validateUnitInterval(learningRateInput.value, "Learning rate")
       );
+      markConfiguring();
     });
     explorationInput.addEventListener("input", () => {
       setFieldError(
@@ -352,8 +433,116 @@
         explorationError,
         validateUnitInterval(explorationInput.value, "Exploration probability")
       );
+      markConfiguring();
     });
     form.addEventListener("submit", saveConfig);
     document.getElementById("reset-defaults").addEventListener("click", resetDefaults);
+
+    const loadConfigurationButton = document.getElementById("load-configuration");
+    const loadAgentDialog = document.getElementById("load-agent-dialog");
+    const loadAgentForm = document.getElementById("load-agent-form");
+    const loadAgentSelect = document.getElementById("load-agent-select");
+
+    async function loadConfigurationFromSaved(filename) {
+      const response = await fetch("{{ url_for('api_agent_import') }}", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename }),
+      });
+
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (error) {
+        data = {};
+      }
+
+      if (!response.ok) {
+        setStatus(data.error || "Could not load configuration.", "error");
+        if (window.ExperimentContext) {
+          ExperimentContext.setStatus("error", "Error");
+        }
+        return;
+      }
+
+      applyConfig(data);
+      if (window.ExperimentContext) {
+        ExperimentContext.setEnvironment(data.environment, data.environment_label);
+        ExperimentContext.setAgent(data.agent, data.agent_label);
+        ExperimentContext.setStatus("ready", "Ready");
+      }
+      const kind = data.kind || "configuration";
+      setStatus(
+        `Loaded ${kind} from ${data.path || filename}. Ready for Visualization and Training.`,
+        "success"
+      );
+    }
+
+    async function openLoadConfigurationDialog() {
+      const response = await fetch("{{ url_for('api_agent_saved') }}");
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (error) {
+        data = {};
+      }
+
+      if (!response.ok) {
+        setStatus(data.error || "Could not list saved agents.", "error");
+        if (window.ExperimentContext) {
+          ExperimentContext.setStatus("error", "Error");
+        }
+        return;
+      }
+
+      const agents = Array.isArray(data.agents) ? data.agents : [];
+      if (!agents.length) {
+        setStatus(
+          `No saved agents found in ${data.directory || "saved_agents"}. Apply a configuration first.`,
+          "error"
+        );
+        return;
+      }
+
+      loadAgentSelect.innerHTML = "";
+      agents.forEach((agent) => {
+        const option = document.createElement("option");
+        option.value = agent.filename;
+        const details = [agent.environment, agent.kind].filter(Boolean).join(" · ");
+        option.textContent = details
+          ? `${agent.filename} — ${details}`
+          : agent.filename;
+        loadAgentSelect.appendChild(option);
+      });
+      loadAgentDialog.showModal();
+    }
+
+    loadConfigurationButton.addEventListener("click", () => {
+      openLoadConfigurationDialog().catch((error) => {
+        setStatus(error.message || "Could not load configuration.", "error");
+        if (window.ExperimentContext) {
+          ExperimentContext.setStatus("error", "Error");
+        }
+      });
+    });
+
+    loadAgentForm.addEventListener("submit", (event) => {
+      const submitter = event.submitter;
+      if (!submitter || submitter.value !== "confirm") {
+        return;
+      }
+      event.preventDefault();
+      const filename = loadAgentSelect.value;
+      loadAgentDialog.close();
+      if (!filename) {
+        return;
+      }
+      loadConfigurationFromSaved(filename).catch((error) => {
+        setStatus(error.message || "Could not load configuration.", "error");
+        if (window.ExperimentContext) {
+          ExperimentContext.setStatus("error", "Error");
+        }
+      });
+    });
   </script>
 {% endblock %}

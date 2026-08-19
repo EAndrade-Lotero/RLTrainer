@@ -662,6 +662,49 @@ body {
   gap: var(--space-3);
 }
 
+.setup-dialog {
+  border: 1px solid var(--border-color, #d0d7de);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--space-5, 1.25rem);
+  max-width: 28rem;
+  width: calc(100% - 2rem);
+  background: var(--surface, #fff);
+  color: inherit;
+}
+
+.setup-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.setup-dialog__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4, 1rem);
+}
+
+.setup-dialog__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 0.5rem);
+}
+
+.setup-dialog__title {
+  margin: 0;
+  font-size: var(--font-size-lg, 1.125rem);
+}
+
+.setup-dialog__subtitle {
+  margin: 0;
+  color: var(--text-muted, #656d76);
+  font-size: var(--font-size-sm, 0.875rem);
+}
+
+.setup-dialog__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3, 0.75rem);
+}
+
 .setup-status {
   flex: 1 1 100%;
   padding: var(--space-3) var(--space-4);

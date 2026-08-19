@@ -19,7 +19,7 @@ from app import app  # noqa: E402
 
 
 CONFIG = {
-    "environment": "CliffWalking-v0",
+    "environment": "CliffWalking-v1",
     "agent": "Q_learning",
     "learning_rate": 0.5,
     "exploration_probability": 0.2,

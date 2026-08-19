@@ -17,16 +17,27 @@ from env_runner import (
     DEFAULT_MAX_TIMESTEPS,
     DEFAULT_TRAINING_EPISODES,
     apply_agent_hyperparameters,
+    describe_saved_agent,
+    get_cached_runtime,
     get_or_create_runtime,
     get_q_table,
+    list_saved_agents,
+    load_agent_from_disk,
     reset_environment,
     reset_experiment_runtime,
     run_single_action,
     run_training_episode,
     run_until_max_timesteps,
+    save_agent_to_disk,
+    update_runtime_config,
 )
+from project_paths import REPO_ROOT, resolve_path, saved_agents_dir, safe_saved_agent_path
 
-app = Flask(__name__)
+app = Flask(
+    __name__,
+    static_folder=str(resolve_path("static")),
+    template_folder=str(resolve_path("templates")),
+)
 app.secret_key = "rl-trainer-dev-secret"
 
 
@@ -41,7 +52,7 @@ ENV_LABELS = {
     "Blackjack-v1": "Blackjack",
     "Taxi-v3": "Taxi",
     "FrozenLake-v1": "Frozen Lake",
-    "CliffWalking-v0": "Cliff Walking",
+    "CliffWalking-v1": "Cliff Walking",
     "Acrobot-v1": "Acrobot",
     "CartPole-v1": "CartPole",
     "MountainCar-v0": "Mountain Car",
@@ -73,7 +84,7 @@ ENV_SPACES = {
         "actions": "4",
         "action_space": {"type": "discrete", "n": 4},
     },
-    "CliffWalking-v0": {
+    "CliffWalking-v1": {
         "states": "48",
         "actions": "4",
         "action_space": {"type": "discrete", "n": 4},
@@ -129,8 +140,8 @@ def get_config():
     # Migrate older session values.
     if config.get("agent") == "tabular":
         config["agent"] = DEFAULT_CONFIG["agent"]
-    if config.get("environment") == "CliffWalking-v1":
-        config["environment"] = "CliffWalking-v0"
+    if config.get("environment") == "CliffWalking-v0":
+        config["environment"] = "CliffWalking-v1"
     return config
 
 
@@ -196,6 +207,9 @@ def api_config():
         return jsonify({"error": "Invalid hyperparameter values"}), 400
 
     current = get_config()
+    identity_changed = (
+        current.get("environment") != environment or current.get("agent") != agent
+    )
     session["config"] = {
         "environment": environment,
         "agent": agent,
@@ -206,7 +220,11 @@ def api_config():
             "training_episodes", DEFAULT_CONFIG["training_episodes"]
         ),
     }
-    reset_experiment_runtime(session)
+    if identity_changed:
+        reset_experiment_runtime(session)
+    else:
+        # Keep the cached agent (Q-table / network); only refresh hyperparameters.
+        update_runtime_config(session, session["config"])
     return jsonify(config_for_template(session["config"]))
 
 
@@ -310,6 +328,148 @@ def api_agent_q_table():
     payload["agent"] = config["agent"]
     payload["agent_label"] = AGENT_LABELS.get(config["agent"], config["agent"])
     return jsonify(payload)
+
+
+@app.route("/api/agent/export", methods=["POST"])
+def api_agent_export():
+    """Save the cached agent into the configured saved_agents directory."""
+    config = get_config()
+    data = request.get_json(silent=True) or {}
+    filename = data.get("filename")
+
+    try:
+        if config["agent"] == "drl-sb3":
+            runtime = get_cached_runtime(session)
+            if runtime is None or runtime.get("sb3_model") is None:
+                return jsonify({"error": "No Stable-Baselines3 model in cache to save."}), 404
+        else:
+            runtime = get_or_create_runtime(session, config, need_agent=True)
+        path, kind = save_agent_to_disk(runtime, filename=filename)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+    relative = path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path
+    return jsonify(
+        {
+            "status": "saved",
+            "kind": kind,
+            "filename": path.name,
+            "path": str(relative),
+            "directory": str(
+                saved_agents_dir(create=False).relative_to(REPO_ROOT)
+                if saved_agents_dir(create=False).is_relative_to(REPO_ROOT)
+                else saved_agents_dir(create=False)
+            ),
+        }
+    )
+
+
+@app.route("/api/agent/saved")
+def api_agent_saved():
+    """List agents available in the configured saved_agents directory."""
+    try:
+        entries = list_saved_agents()
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+    directory = saved_agents_dir(create=True)
+    relative_dir = (
+        str(directory.relative_to(REPO_ROOT))
+        if directory.is_relative_to(REPO_ROOT)
+        else str(directory)
+    )
+    return jsonify({"directory": relative_dir, "agents": entries})
+
+
+def _align_config_with_saved_agent(content: bytes, filename: str) -> dict:
+    """
+    Point the session at the environment/agent the artifact was saved for.
+
+    Without this, a file saved for one environment would be loaded into an agent
+    sized for whatever is currently selected.
+    """
+    config = get_config()
+    described = describe_saved_agent(content, filename)
+    environment = described.get("environment")
+    agent = described.get("agent")
+
+    changed = False
+    if environment and environment != config["environment"]:
+        if environment not in ENV_SPACES:
+            raise ValueError(f"Unknown environment in saved agent: {environment}")
+        config["environment"] = environment
+        changed = True
+    if agent and agent != config["agent"]:
+        if agent not in AGENT_LABELS:
+            raise ValueError(f"Unknown agent in saved agent: {agent}")
+        config["agent"] = agent
+        changed = True
+
+    if changed:
+        session["config"] = config
+        reset_experiment_runtime(session)
+    return config
+
+
+@app.route("/api/agent/import", methods=["POST"])
+def api_agent_import():
+    """Load a Q-table JSON or SB3 .zip from saved_agents (or an uploaded file)."""
+    data = request.get_json(silent=True) or {}
+    filename = data.get("filename")
+    upload = request.files.get("file")
+
+    try:
+        if filename:
+            path = safe_saved_agent_path(filename)
+            if not path.is_file():
+                return jsonify({"error": f"Saved agent not found: {path.name}"}), 404
+            content = path.read_bytes()
+        elif upload is not None and upload.filename:
+            content = upload.read()
+            if not content:
+                return jsonify({"error": "The selected file is empty."}), 400
+            # Copy upload into saved_agents so loads always come from one place.
+            path = safe_saved_agent_path(upload.filename)
+            path.write_bytes(content)
+        else:
+            return jsonify(
+                {"error": "Choose a saved agent filename or upload a file."}
+            ), 400
+
+        config = _align_config_with_saved_agent(content, path.name)
+
+        if config["agent"] == "drl-sb3":
+            runtime = get_cached_runtime(session)
+            if runtime is None or runtime.get("sb3_model") is None:
+                return jsonify(
+                    {"error": "No Stable-Baselines3 model in cache to load into."}
+                ), 404
+        else:
+            runtime = get_or_create_runtime(session, config, need_agent=True)
+
+        kind, path = load_agent_from_disk(runtime, path.name)
+    except FileNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+    relative = (
+        str(path.relative_to(REPO_ROOT))
+        if path.is_relative_to(REPO_ROOT)
+        else str(path)
+    )
+    return jsonify(
+        {
+            "status": "loaded",
+            "kind": kind,
+            "filename": path.name,
+            "path": relative,
+            **config_for_template(config),
+        }
+    )
 
 
 @app.route("/api/training/start", methods=["POST"])

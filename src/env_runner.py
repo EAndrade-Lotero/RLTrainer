@@ -5,8 +5,11 @@ from __future__ import annotations
 import base64
 import atexit
 import io
+import json
 import secrets
+import tempfile
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Iterator
 
 import gymnasium as gym
@@ -114,15 +117,258 @@ def invalidate_runtime(session) -> None:
 
 
 def reset_experiment_runtime(session) -> None:
-    """
-    Discard the current environment/agent so the next use starts from scratch.
-
-    Applying configuration must leave the Q-table at 0 even if the environment,
-    agent, and hyperparameters did not change.
-    """
+    """Discard the current environment/agent so the next use starts from scratch."""
     session["runtime_generation"] = int(session.get("runtime_generation", 0)) + 1
     session.modified = True
     invalidate_runtime(session)
+
+
+def runtime_fingerprint(config: dict, session) -> tuple:
+    """Identity fingerprint: environment + agent + generation (not hyperparameters)."""
+    return (
+        config["environment"],
+        config["agent"],
+        int(session.get("runtime_generation", 0)),
+    )
+
+
+def get_cached_runtime(session) -> dict[str, Any] | None:
+    sid = session.get("sid")
+    if not sid:
+        return None
+    return _RUNTIMES.get(sid)
+
+
+def update_runtime_config(session, config: dict) -> None:
+    """Keep the cached agent and refresh hyperparameters / fingerprint."""
+    runtime = get_cached_runtime(session)
+    if runtime is None:
+        return
+    runtime["config"] = dict(config)
+    runtime["fingerprint"] = runtime_fingerprint(config, session)
+    apply_agent_hyperparameters(runtime, config)
+
+
+def export_agent(runtime: dict[str, Any]) -> tuple[bytes, str, str]:
+    """
+    Serialize the cached agent.
+
+    Tabular agents export Q/policy JSON (same schema as Agent.save).
+    Stable-Baselines3 agents use model.save() → .zip (SB3 convention).
+    """
+    config = runtime.get("config") or {}
+    agent_id = config.get("agent", "agent")
+    env_id = str(config.get("environment", "environment")).replace("/", "-")
+    agent = runtime.get("agent")
+
+    if agent_id == "drl-sb3":
+        model = runtime.get("sb3_model")
+        if model is None:
+            raise ValueError("No Stable-Baselines3 model is available to save.")
+        # SB3 best practice: model.save(path) writes path.zip
+        with tempfile.TemporaryDirectory() as tmp:
+            save_path = str(Path(tmp) / f"{env_id}_{agent_id}_model")
+            model.save(save_path)
+            zip_path = Path(f"{save_path}.zip")
+            if not zip_path.is_file():
+                zip_path = Path(save_path)
+            content = zip_path.read_bytes()
+        return content, f"{env_id}_{agent_id}_model.zip", "application/zip"
+
+    if agent is None or not hasattr(agent, "Q"):
+        raise ValueError("No agent in cache to save.")
+
+    payload = {
+        "metadata": {
+            "environment": config.get("environment", ""),
+            "agent": agent_id,
+        },
+        "Q": np.asarray(agent.Q, dtype=float).tolist(),
+    }
+    if hasattr(agent, "policy"):
+        payload["policy"] = np.asarray(agent.policy, dtype=float).tolist()
+
+    content = json.dumps(payload, indent=4).encode("utf-8")
+    filename = f"{env_id}_{agent_id}_q_table.json"
+    return content, filename, "application/json"
+
+
+def _identity_from_filename(filename: str) -> dict[str, str]:
+    """Recover environment/agent from the `<env>_<agent>_<kind>` naming scheme."""
+    stem = Path(filename).stem
+    for suffix in ("_q_table", "_model"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    known_agents = [*TABULAR_AGENTS, "drl-sb3"]
+    for agent_id in sorted(known_agents, key=len, reverse=True):
+        marker = f"_{agent_id}"
+        if stem.endswith(marker) and len(stem) > len(marker):
+            return {"environment": stem[: -len(marker)], "agent": agent_id}
+    return {}
+
+
+def describe_saved_agent(content: bytes, filename: str = "") -> dict[str, str]:
+    """
+    Best-effort environment/agent identity for a saved artifact.
+
+    Prefers embedded metadata; falls back to the filename for older exports
+    and for SB3 zips, which carry no RL Trainer metadata.
+    """
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = None
+
+    if isinstance(payload, dict):
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            described = {
+                key: str(metadata[key])
+                for key in ("environment", "agent")
+                if metadata.get(key)
+            }
+            if described:
+                return described
+
+    return _identity_from_filename(filename)
+
+
+def save_agent_to_disk(
+    runtime: dict[str, Any],
+    filename: str | None = None,
+) -> tuple[Path, str]:
+    """
+    Persist the cached agent under the configured saved_agents directory.
+
+    Returns (absolute_path, kind_label).
+    """
+    from project_paths import safe_saved_agent_path, saved_agents_dir
+
+    saved_agents_dir(create=True)
+    content, default_name, _mime = export_agent(runtime)
+    target = safe_saved_agent_path(filename or default_name)
+
+    config = runtime.get("config") or {}
+    agent_id = config.get("agent", "agent")
+    if agent_id == "drl-sb3":
+        model = runtime.get("sb3_model")
+        if model is None:
+            raise ValueError("No Stable-Baselines3 model is available to save.")
+        # Write directly with SB3 so the zip layout matches library conventions.
+        save_stem = target.with_suffix("")
+        model.save(str(save_stem))
+        zip_path = Path(f"{save_stem}.zip")
+        if not zip_path.is_file():
+            zip_path = save_stem
+        return zip_path.resolve(), "Stable-Baselines3 model"
+
+    target.write_bytes(content)
+    return target.resolve(), "Q-table"
+
+
+def list_saved_agents() -> list[dict[str, str]]:
+    """List agent artifacts in the configured saved_agents directory."""
+    from project_paths import saved_agents_dir
+
+    directory = saved_agents_dir(create=True)
+    entries: list[dict[str, str]] = []
+    for path in sorted(directory.iterdir(), key=lambda item: item.name.lower()):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        if path.suffix.lower() not in {".json", ".zip"}:
+            continue
+        # SB3 zips carry no metadata, so their identity comes from the filename.
+        raw = path.read_bytes() if path.suffix.lower() == ".json" else b""
+        described = describe_saved_agent(raw, path.name)
+        entries.append(
+            {
+                "filename": path.name,
+                "path": str(path.resolve()),
+                "kind": "Stable-Baselines3 model" if path.suffix.lower() == ".zip" else "Q-table",
+                "environment": described.get("environment", ""),
+                "agent": described.get("agent", ""),
+            }
+        )
+    return entries
+
+
+def import_agent(runtime: dict[str, Any], content: bytes, filename: str = "") -> str:
+    """
+    Load a previously exported Q-table (JSON) or SB3 model (.zip) into the cache.
+
+    Returns a short description of what was loaded.
+    """
+    config = runtime.get("config") or {}
+    agent_id = config.get("agent", "agent")
+
+    if agent_id == "drl-sb3":
+        model = runtime.get("sb3_model")
+        if model is None:
+            raise ValueError("No Stable-Baselines3 model is available to load into.")
+        # SB3 best practice: Algo.load(path) reads path.zip
+        with tempfile.TemporaryDirectory() as tmp:
+            base_name = Path(filename).stem if filename else "model"
+            save_path = Path(tmp) / base_name
+            zip_path = save_path.with_suffix(".zip")
+            zip_path.write_bytes(content)
+            model_cls = type(model)
+            if not hasattr(model_cls, "load"):
+                raise ValueError("Stable-Baselines3 model does not support load().")
+            runtime["sb3_model"] = model_cls.load(str(save_path))
+        return "Stable-Baselines3 model"
+
+    agent = runtime.get("agent")
+    if agent is None or not hasattr(agent, "Q"):
+        raise ValueError("No tabular agent in cache to load into.")
+
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Expected a JSON Q-table file.") from exc
+
+    if "Q" not in payload:
+        raise ValueError("JSON file must contain a 'Q' field.")
+
+    q_values = np.asarray(payload["Q"], dtype=float)
+    expected = np.asarray(agent.Q)
+    if q_values.shape != expected.shape:
+        described = describe_saved_agent(content, filename)
+        source = described.get("environment") or "another environment"
+        raise ValueError(
+            f"This file was saved for {source} "
+            f"(Q-table {tuple(q_values.shape)}), which does not fit "
+            f"{config.get('environment', 'the current environment')} "
+            f"(Q-table {tuple(expected.shape)})."
+        )
+
+    if hasattr(agent, "reset"):
+        agent.reset()
+    agent.Q = q_values
+    if "policy" in payload and hasattr(agent, "policy"):
+        policy = np.asarray(payload["policy"], dtype=float)
+        if policy.shape != np.asarray(agent.policy).shape:
+            raise ValueError(
+                f"Policy shape {tuple(policy.shape)} does not match "
+                f"current agent shape {tuple(np.asarray(agent.policy).shape)}."
+            )
+        agent.policy = policy
+    elif hasattr(agent, "update_policy"):
+        for state in range(int(agent.nS)):
+            agent.update_policy(state)
+
+    return "Q-table"
+
+
+def load_agent_from_disk(runtime: dict[str, Any], filename: str) -> tuple[str, Path]:
+    """Load an agent artifact from the configured saved_agents directory."""
+    from project_paths import safe_saved_agent_path
+
+    path = safe_saved_agent_path(filename)
+    if not path.is_file():
+        raise FileNotFoundError(f"Saved agent not found: {path.name}")
+    kind = import_agent(runtime, path.read_bytes(), path.name)
+    return kind, path
 
 
 def close_all_runtimes() -> None:
@@ -254,18 +500,13 @@ def create_agent(agent_name: str, env: gym.Env, config: dict):
 def get_or_create_runtime(session, config: dict, need_agent: bool = False) -> dict[str, Any]:
     sid = ensure_session_id(session)
     runtime = _RUNTIMES.get(sid)
-    fingerprint = (
-        config["environment"],
-        config["agent"],
-        float(config["learning_rate"]),
-        float(config["exploration_probability"]),
-        float(config.get("discount_factor", DEFAULT_GAMMA)),
-        int(session.get("runtime_generation", 0)),
-    )
+    fingerprint = runtime_fingerprint(config, session)
 
     if runtime is not None and runtime.get("fingerprint") == fingerprint:
+        runtime["config"] = dict(config)
         if need_agent and runtime.get("agent") is None:
             runtime["agent"] = create_agent(config["agent"], runtime["env"], config)
+        apply_agent_hyperparameters(runtime, config)
         return runtime
 
     if runtime is not None:
