@@ -15,17 +15,79 @@
   <div class="viz-workspace">
     <div class="viz-params">
       <div class="viz-params__item">
-        <span class="viz-params__label">Learning rate</span>
-        <strong id="config-lr">{{ config.learning_rate }}</strong>
+        <label class="viz-params__label" for="config-lr">Learning rate</label>
+        <input
+          type="number"
+          id="config-lr"
+          class="input viz-params__input"
+          value="{{ config.learning_rate }}"
+          min="0"
+          max="1"
+          step="0.01"
+        >
       </div>
       <div class="viz-params__item">
-        <span class="viz-params__label">Exploration</span>
-        <strong id="config-eps">{{ config.exploration_probability }}</strong>
+        <label class="viz-params__label" for="config-eps">Exploration</label>
+        <input
+          type="number"
+          id="config-eps"
+          class="input viz-params__input"
+          value="{{ config.exploration_probability }}"
+          min="0"
+          max="1"
+          step="0.01"
+        >
       </div>
-      <label class="viz-toggle" for="show-q-values">
-        <input type="checkbox" id="show-q-values" checked>
-        <span>Show Q values</span>
-      </label>
+      <div class="viz-params__item">
+        <label class="viz-params__label" for="config-timesteps">Timesteps</label>
+        <input
+          type="number"
+          id="config-timesteps"
+          class="input viz-params__input"
+          value="{{ config.max_timesteps }}"
+          min="1"
+          max="10000"
+          step="1"
+        >
+      </div>
+      <div class="viz-params__item" id="temperature-item" hidden>
+        <label class="viz-params__label" for="config-temperature">Temperature</label>
+        <input
+          type="number"
+          id="config-temperature"
+          class="input viz-params__input"
+          value="1"
+          min="0.01"
+          max="100"
+          step="0.01"
+        >
+      </div>
+      <div class="viz-params__toggles">
+        <label class="viz-toggle" for="allow-learning">
+          <input
+            type="checkbox"
+            id="allow-learning"
+            {% if config.allow_learning %}checked{% endif %}
+          >
+          <span>Allow learning</span>
+        </label>
+        <div class="viz-params__item">
+          <label class="viz-params__label" for="chart-mode">Chart</label>
+          <select id="chart-mode" class="select viz-params__select" aria-label="Chart">
+            <option value="none">Environment only</option>
+            <option value="q" selected>Q values</option>
+            <option value="epsilon">ε-greedy policy</option>
+            <option value="softmax">Softmax</option>
+          </select>
+        </div>
+      </div>
+      <p
+        class="viz-params__status"
+        id="config-feedback"
+        role="status"
+        aria-live="polite"
+        hidden
+      ></p>
     </div>
 
     <div class="viz-layout">
@@ -50,11 +112,14 @@
 
         <div class="viz-toolbar">
           <button type="button" class="btn btn--primary" id="run-episode">
-            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <svg class="nav-icon" id="run-episode-icon-play" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polygon points="6 3 20 12 6 21 6 3"></polygon>
               <line x1="20" y1="3" x2="20" y2="21"></line>
             </svg>
-            Run episode
+            <svg class="nav-icon is-hidden" id="run-episode-icon-stop" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor" hidden>
+              <rect x="6" y="6" width="12" height="12" rx="1"></rect>
+            </svg>
+            <span id="run-episode-label">Run episode</span>
           </button>
           <button type="button" class="btn btn--secondary" id="run-action">
             <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -62,17 +127,20 @@
             </svg>
             Run an action
           </button>
-          <div class="viz-toolbar__field">
+          <div class="viz-toolbar__field" id="discrete-action-field">
             <label class="label" for="action-to-run">Action to run</label>
             <select id="action-to-run" class="select" aria-label="Action to run"></select>
+          </div>
+          <div class="viz-toolbar__field" id="continuous-action-field" hidden>
+            <label class="label" for="continuous-action">Action to run</label>
             <input
               type="number"
               id="continuous-action"
               class="input"
               step="0.01"
-              hidden
               aria-label="Continuous action value"
             >
+            <p class="helper-text" id="continuous-action-hint"></p>
           </div>
         </div>
       </section>
@@ -133,6 +201,9 @@
 
     const actionSelect = document.getElementById("action-to-run");
     const continuousAction = document.getElementById("continuous-action");
+    const discreteActionField = document.getElementById("discrete-action-field");
+    const continuousActionField = document.getElementById("continuous-action-field");
+    const continuousActionHint = document.getElementById("continuous-action-hint");
     const timestepLabel = document.getElementById("timestep-label");
     const rewardLabel = document.getElementById("reward-label");
     const infoState = document.getElementById("info-state");
@@ -142,17 +213,31 @@
     const envRender = document.getElementById("env-render");
     const envFrame = document.getElementById("env-frame");
     const runEpisodeButton = document.getElementById("run-episode");
+    const runEpisodeLabel = document.getElementById("run-episode-label");
+    const runEpisodeIconPlay = document.getElementById("run-episode-icon-play");
+    const runEpisodeIconStop = document.getElementById("run-episode-icon-stop");
     const runActionButton = document.getElementById("run-action");
     const prevFrameButton = document.getElementById("prev-frame");
     const nextFrameButton = document.getElementById("next-frame");
-    const showQValues = document.getElementById("show-q-values");
+    const allowLearning = document.getElementById("allow-learning");
+    const chartModeSelect = document.getElementById("chart-mode");
+    const temperatureInput = document.getElementById("config-temperature");
+    const temperatureItem = document.getElementById("temperature-item");
+    const learningRateInput = document.getElementById("config-lr");
+    const explorationInput = document.getElementById("config-eps");
+    const timestepsInput = document.getElementById("config-timesteps");
+    const configFeedback = document.getElementById("config-feedback");
     const qChartPanel = document.getElementById("q-chart-panel");
     const qChartPlot = document.getElementById("q-chart-plot");
     const qChartEmpty = document.getElementById("q-chart-empty");
+    const qChartTitle = document.getElementById("q-chart-title");
     const qChartSubtitle = document.getElementById("q-chart-subtitle");
     const FRAME_DELAY_MS = 120;
 
     let animationTimer = null;
+    let episodeAbort = null;
+    let episodeBusy = false;
+    let stopRequested = false;
     let episodeFrames = [];
     let frameIndex = -1;
     let maxTimesteps = config.max_timesteps || 100;
@@ -164,6 +249,79 @@
       if (window.ExperimentContext) {
         ExperimentContext.setStatus(state, label);
       }
+    }
+
+    function setConfigFeedback(message, type) {
+      configFeedback.hidden = !message;
+      configFeedback.textContent = message || "";
+      configFeedback.classList.remove(
+        "viz-params__status--success",
+        "viz-params__status--error"
+      );
+      if (type) {
+        configFeedback.classList.add(`viz-params__status--${type}`);
+      }
+    }
+
+    async function saveHyperparameters() {
+      const learningRate = Number(learningRateInput.value);
+      const exploration = Number(explorationInput.value);
+      const timesteps = Number(timestepsInput.value);
+
+      if (!Number.isFinite(learningRate) || learningRate < 0 || learningRate > 1) {
+        setConfigFeedback("Learning rate must be between 0 and 1.", "error");
+        return;
+      }
+      if (!Number.isFinite(exploration) || exploration < 0 || exploration > 1) {
+        setConfigFeedback("Exploration must be between 0 and 1.", "error");
+        return;
+      }
+      if (!Number.isInteger(timesteps) || timesteps < 1 || timesteps > 10000) {
+        setConfigFeedback("Timesteps must be an integer between 1 and 10000.", "error");
+        return;
+      }
+
+      const response = await fetch("{{ url_for('api_config') }}", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          environment: config.environment,
+          agent: config.agent,
+          learning_rate: learningRate,
+          exploration_probability: exploration,
+          discount_factor: config.discount_factor,
+          max_timesteps: timesteps,
+          allow_learning: allowLearning.checked,
+        }),
+      });
+
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (error) {
+        data = {};
+      }
+
+      if (!response.ok) {
+        setConfigFeedback(data.error || "Could not update parameters.", "error");
+        return;
+      }
+
+      config.learning_rate = data.learning_rate;
+      config.exploration_probability = data.exploration_probability;
+      config.max_timesteps = data.max_timesteps;
+      config.allow_learning = Boolean(data.allow_learning);
+      learningRateInput.value = data.learning_rate;
+      explorationInput.value = data.exploration_probability;
+      timestepsInput.value = data.max_timesteps;
+      if (Object.prototype.hasOwnProperty.call(data, "allow_learning")) {
+        allowLearning.checked = Boolean(data.allow_learning);
+      }
+      maxTimesteps = data.max_timesteps || maxTimesteps;
+      const currentTimestep = (timestepLabel.textContent.split("/")[0] || "0").trim();
+      timestepLabel.textContent = `${currentTimestep} / ${maxTimesteps}`;
+      setConfigFeedback("Parameters updated.", "success");
+      qChartFromAgent(lastStateIndex);
     }
 
     function formatObservation(observation) {
@@ -249,8 +407,55 @@
       agentQTable = data.q_table;
     }
 
+    function formatProb(value) {
+      const number = Number(value);
+      if (Number.isNaN(number)) {
+        return "—";
+      }
+      return `${(number * 100).toFixed(1)}%`;
+    }
+
+    function softmax(values, temperature) {
+      const tau = Math.max(Number(temperature) || 0, 1e-8);
+      const scaled = values.map((value) => value / tau);
+      const peak = Math.max(...scaled);
+      const exps = scaled.map((value) => Math.exp(value - peak));
+      const total = exps.reduce((sum, value) => sum + value, 0);
+      if (!total) {
+        return values.map(() => 1 / values.length);
+      }
+      return exps.map((value) => value / total);
+    }
+
+    function epsilonGreedyPolicy(values, greedyActions, epsilon) {
+      const n = values.length;
+      if (!n) {
+        return [];
+      }
+      if (n === 1) {
+        return [1];
+      }
+      const eps = Math.min(1, Math.max(0, Number(epsilon) || 0));
+      const greedy = greedyActions.length ? greedyActions[0] : 0;
+      return values.map((_, index) => (
+        index === greedy ? 1 - eps : eps / (n - 1)
+      ));
+    }
+
+    function chartMode() {
+      return chartModeSelect.value;
+    }
+
+    function syncTemperatureField() {
+      temperatureItem.hidden = chartMode() !== "softmax";
+    }
+
     function qChartFromAgent(stateIndex) {
       lastStateIndex = stateIndex;
+      if (chartMode() === "none") {
+        renderQChart(null);
+        return;
+      }
       if (!agentQTable || !Number.isInteger(stateIndex) || !agentQTable[stateIndex]) {
         renderQChart(null);
         return;
@@ -278,54 +483,93 @@
         latestQValues = qPayload;
       }
 
-      if (!showQValues.checked) {
+      const mode = chartMode();
+      if (mode === "none") {
         qChartPanel.hidden = true;
         return;
       }
 
       qChartPanel.hidden = false;
-      const values = latestQValues && Array.isArray(latestQValues.values)
+      const qValues = latestQValues && Array.isArray(latestQValues.values)
         ? latestQValues.values.map(Number)
         : [];
+      const greedy = latestQValues && Array.isArray(latestQValues.greedy_actions)
+        ? latestQValues.greedy_actions
+        : [];
 
-      if (!values.length || values.some((value) => Number.isNaN(value))) {
-        qChartPlot.hidden = true;
-        qChartPlot.innerHTML = "";
-        qChartEmpty.hidden = false;
-        qChartSubtitle.textContent = "Current state";
-        return;
+      let title = "Q values";
+      let emptyMessage = "Q values are not available for this agent or state.";
+      let displayValues = qValues;
+      let kind = "q";
+      let highlighted = new Set(greedy);
+
+      if (mode === "epsilon") {
+        title = "ε-greedy policy";
+        emptyMessage = "Policy is not available for this agent or state.";
+        kind = "prob";
+        displayValues = qValues.length
+          ? epsilonGreedyPolicy(qValues, greedy, explorationInput.value)
+          : [];
+      } else if (mode === "softmax") {
+        title = "Softmax";
+        emptyMessage = "Softmax is not available for this agent or state.";
+        kind = "prob";
+        displayValues = qValues.length
+          ? softmax(qValues, temperatureInput.value)
+          : [];
+        if (displayValues.length) {
+          const bestProb = Math.max(...displayValues);
+          highlighted = new Set(
+            displayValues
+              .map((value, index) => (value === bestProb ? index : -1))
+              .filter((index) => index >= 0)
+          );
+        }
       }
 
-      const greedy = new Set(latestQValues.greedy_actions || []);
-      const minValue = Math.min(0, ...values);
-      const maxValue = Math.max(0, ...values);
-      const span = Math.max(maxValue - minValue, 1e-9);
-      const zeroPercent = ((0 - minValue) / span) * 100;
-      const stateIndex = latestQValues.state_index;
+      qChartTitle.textContent = title;
+      const stateIndex = latestQValues && latestQValues.state_index;
       qChartSubtitle.textContent = Number.isInteger(stateIndex)
         ? `State ${stateIndex}`
         : "Current state";
+
+      if (!displayValues.length || displayValues.some((value) => Number.isNaN(value))) {
+        qChartPlot.hidden = true;
+        qChartPlot.innerHTML = "";
+        qChartEmpty.hidden = false;
+        qChartEmpty.textContent = emptyMessage;
+        return;
+      }
+
+      const minValue = kind === "prob" ? 0 : Math.min(0, ...displayValues);
+      const maxValue = kind === "prob" ? 1 : Math.max(0, ...displayValues);
+      const span = Math.max(maxValue - minValue, 1e-9);
+      const zeroPercent = ((0 - minValue) / span) * 100;
+      const formatValue = kind === "prob" ? formatProb : formatQ;
 
       qChartEmpty.hidden = true;
       qChartPlot.hidden = false;
       qChartPlot.replaceChildren();
       qChartPlot.setAttribute(
         "aria-label",
-        `Q values for ${values.map((value, index) => `${actionLabel(index)} ${formatQ(value)}`).join(", ")}`
+        `${title} for ${displayValues.map((value, index) => `${actionLabel(index)} ${formatValue(value)}`).join(", ")}`
       );
 
-      values.forEach((value, index) => {
+      displayValues.forEach((value, index) => {
         const heightPercent = (Math.abs(value) / span) * 100;
         const isNegative = value < 0;
         const column = document.createElement("div");
         column.className = "q-bar";
-        if (greedy.has(index)) {
+        if (kind === "prob") {
+          column.classList.add("is-probability");
+        }
+        if (highlighted.has(index)) {
           column.classList.add("is-greedy");
         }
 
         const valueLabel = document.createElement("span");
         valueLabel.className = "q-bar__value";
-        valueLabel.textContent = formatQ(value);
+        valueLabel.textContent = formatValue(value);
 
         const track = document.createElement("div");
         track.className = "q-bar__track";
@@ -352,14 +596,14 @@
     }
 
     function selectedActionPayload() {
-      const value = actionSelect.value;
-      if (value === "manual") {
+      if (config.action_space && config.action_space.type === "box") {
         return {
           action: "manual",
           manual_action: continuousAction.value,
+          allow_learning: allowLearning.checked,
         };
       }
-      return { action: value };
+      return { action: actionSelect.value, allow_learning: allowLearning.checked };
     }
 
     function populateActions(actionSpace) {
@@ -370,35 +614,30 @@
       policyOption.selected = true;
       actionSelect.appendChild(policyOption);
 
-      if (!actionSpace) {
-        continuousAction.hidden = true;
-        actionSelect.hidden = false;
+      const isContinuous = actionSpace && actionSpace.type === "box";
+      discreteActionField.hidden = Boolean(isContinuous);
+      continuousActionField.hidden = !isContinuous;
+
+      if (isContinuous) {
+        continuousAction.min = actionSpace.low;
+        continuousAction.max = actionSpace.high;
+        continuousAction.value = ((actionSpace.low + actionSpace.high) / 2).toFixed(2);
+        continuousAction.placeholder = `${actionSpace.low} … ${actionSpace.high}`;
+        continuousActionHint.textContent = `Range: ${actionSpace.low} … ${actionSpace.high}`;
         return;
       }
 
-      if (actionSpace.type === "discrete") {
-        continuousAction.hidden = true;
-        actionSelect.hidden = false;
-        const labels = ACTION_LABELS[config.environment] || [];
-        for (let i = 0; i < actionSpace.n; i++) {
-          const option = document.createElement("option");
-          option.value = String(i);
-          option.textContent = labels[i] ? `${labels[i]} (${i})` : `Action ${i}`;
-          actionSelect.appendChild(option);
-        }
+      if (!actionSpace || actionSpace.type !== "discrete") {
         return;
       }
 
-      continuousAction.hidden = true;
-      continuousAction.min = actionSpace.low;
-      continuousAction.max = actionSpace.high;
-      continuousAction.value = ((actionSpace.low + actionSpace.high) / 2).toFixed(2);
-      continuousAction.placeholder = `${actionSpace.low} … ${actionSpace.high}`;
-
-      const manualOption = document.createElement("option");
-      manualOption.value = "manual";
-      manualOption.textContent = `Manual value (${actionSpace.low} … ${actionSpace.high})`;
-      actionSelect.appendChild(manualOption);
+      const labels = ACTION_LABELS[config.environment] || [];
+      for (let i = 0; i < actionSpace.n; i++) {
+        const option = document.createElement("option");
+        option.value = String(i);
+        option.textContent = labels[i] ? `${labels[i]} (${i})` : `Action ${i}`;
+        actionSelect.appendChild(option);
+      }
     }
 
     function showMessage(message) {
@@ -463,11 +702,59 @@
       updateStepper();
     }
 
+    function setEpisodeControls(running) {
+      episodeBusy = running;
+      runEpisodeButton.classList.toggle("btn--primary", !running);
+      runEpisodeButton.classList.toggle("btn--secondary", running);
+      runEpisodeLabel.textContent = running ? "Stop episode" : "Run episode";
+      runEpisodeIconPlay.classList.toggle("is-hidden", running);
+      runEpisodeIconStop.classList.toggle("is-hidden", !running);
+      runEpisodeIconPlay.hidden = running;
+      runEpisodeIconStop.hidden = !running;
+      runActionButton.disabled = running;
+      if (running) {
+        prevFrameButton.disabled = true;
+        nextFrameButton.disabled = true;
+        return;
+      }
+      updateStepper();
+    }
+
+    function restoreVisibleFrame() {
+      if (episodeFrames.length && frameIndex >= 0) {
+        showFrameAt(Math.min(frameIndex, episodeFrames.length - 1));
+        return;
+      }
+      if (envFrame.getAttribute("src")) {
+        showFrame(envFrame.src);
+      }
+    }
+
     function stopAnimation() {
       if (animationTimer !== null) {
         clearTimeout(animationTimer);
         animationTimer = null;
       }
+    }
+
+    function stopEpisode() {
+      stopRequested = true;
+      if (episodeAbort) {
+        episodeAbort.abort();
+        episodeAbort = null;
+      }
+      stopAnimation();
+      setEpisodeControls(false);
+      restoreVisibleFrame();
+      setRunStatus("ready", "Ready");
+    }
+
+    function onEpisodeButtonClick() {
+      if (episodeBusy) {
+        stopEpisode();
+        return;
+      }
+      runEpisode();
     }
 
     function playFrames(frames) {
@@ -477,15 +764,20 @@
       setRunStatus("ready", "Ready");
 
       function showNext() {
+        if (stopRequested) {
+          setEpisodeControls(false);
+          updateStepper();
+          return;
+        }
         showFrameAt(frameIndex);
         if (frameIndex < episodeFrames.length - 1) {
-          frameIndex += 1;
-          animationTimer = setTimeout(showNext, FRAME_DELAY_MS);
+          animationTimer = setTimeout(() => {
+            frameIndex += 1;
+            showNext();
+          }, FRAME_DELAY_MS);
         } else {
+          setEpisodeControls(false);
           setRunStatus("ready", "Ready");
-          runEpisodeButton.disabled = false;
-          runActionButton.disabled = false;
-          updateStepper();
         }
       }
 
@@ -515,31 +807,46 @@
     }
 
     async function runEpisode() {
+      stopRequested = false;
       stopAnimation();
-      runEpisodeButton.disabled = true;
-      runActionButton.disabled = true;
-      prevFrameButton.disabled = true;
-      nextFrameButton.disabled = true;
+      setEpisodeControls(true);
       showMessage("Running episode…");
       setRunStatus("ready", "Ready");
 
-      const response = await fetch("{{ url_for('api_environment_run_episode') }}", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(selectedActionPayload()),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        showMessage(data.error || "Could not run episode.");
+      episodeAbort = new AbortController();
+      try {
+        const response = await fetch("{{ url_for('api_environment_run_episode') }}", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(selectedActionPayload()),
+          signal: episodeAbort.signal,
+        });
+        const data = await response.json();
+        if (stopRequested) {
+          return;
+        }
+        if (!response.ok) {
+          showMessage(data.error || "Could not run episode.");
+          setRunStatus("error", "Error");
+          setEpisodeControls(false);
+          return;
+        }
+        maxTimesteps = data.max_timesteps || maxTimesteps;
+        await loadAgentQTable();
+        if (stopRequested) {
+          return;
+        }
+        playFrames(data.frames);
+      } catch (error) {
+        if (error && error.name === "AbortError") {
+          return;
+        }
+        showMessage("Could not run episode.");
         setRunStatus("error", "Error");
-        runEpisodeButton.disabled = false;
-        runActionButton.disabled = false;
-        updateStepper();
-        return;
+        setEpisodeControls(false);
+      } finally {
+        episodeAbort = null;
       }
-      maxTimesteps = data.max_timesteps || maxTimesteps;
-      await loadAgentQTable();
-      playFrames(data.frames);
     }
 
     async function runAction() {
@@ -591,16 +898,29 @@
     }
 
     populateActions(config.action_space);
-    actionSelect.addEventListener("change", () => {
-      if (config.action_space && config.action_space.type === "box") {
-        continuousAction.hidden = actionSelect.value !== "manual";
-      }
-    });
-    runEpisodeButton.addEventListener("click", runEpisode);
+    runEpisodeButton.addEventListener("click", onEpisodeButtonClick);
     runActionButton.addEventListener("click", runAction);
     prevFrameButton.addEventListener("click", () => showFrameAt(frameIndex - 1));
     nextFrameButton.addEventListener("click", () => showFrameAt(frameIndex + 1));
-    showQValues.addEventListener("change", () => qChartFromAgent(lastStateIndex));
+    chartModeSelect.addEventListener("change", () => {
+      syncTemperatureField();
+      qChartFromAgent(lastStateIndex);
+    });
+    temperatureInput.addEventListener("input", () => {
+      if (chartMode() === "softmax") {
+        qChartFromAgent(lastStateIndex);
+      }
+    });
+    explorationInput.addEventListener("input", () => {
+      if (chartMode() === "epsilon") {
+        qChartFromAgent(lastStateIndex);
+      }
+    });
+    allowLearning.addEventListener("change", saveHyperparameters);
+    learningRateInput.addEventListener("change", saveHyperparameters);
+    explorationInput.addEventListener("change", saveHyperparameters);
+    timestepsInput.addEventListener("change", saveHyperparameters);
+    syncTemperatureField();
     loadInitialState();
   </script>
 {% endblock %}

@@ -260,6 +260,11 @@ body {
   flex-shrink: 0;
 }
 
+.nav-icon[hidden],
+.nav-icon.is-hidden {
+  display: none;
+}
+
 .sidebar-backdrop {
   display: none;
 }
@@ -768,11 +773,18 @@ body {
   box-shadow: var(--shadow-xs);
 }
 
+.viz-params__toggles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+  margin-left: auto;
+}
+
 .viz-toggle {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  margin-left: auto;
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-medium);
   color: var(--color-text);
@@ -793,7 +805,12 @@ body {
   gap: 0.1rem;
 }
 
+.viz-params__item[hidden] {
+  display: none;
+}
+
 .viz-params__label {
+  margin-bottom: 0;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-medium);
   letter-spacing: 0.04em;
@@ -805,6 +822,38 @@ body {
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-semibold);
   color: var(--color-text);
+}
+
+.viz-params__input {
+  width: 6rem;
+  min-height: var(--control-height-sm);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.viz-params__select {
+  width: auto;
+  min-width: 11rem;
+  min-height: var(--control-height-sm);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.viz-params__status {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.viz-params__status--success {
+  color: var(--color-success);
+}
+
+.viz-params__status--error {
+  color: var(--color-danger);
 }
 
 .viz-status-pill {
@@ -1016,6 +1065,10 @@ body {
   background-color: var(--color-primary-hover);
 }
 
+.q-bar.is-probability .q-bar__fill.is-positive {
+  background-color: var(--color-primary);
+}
+
 .q-bar__label {
   font-size: 0.7rem;
   font-weight: var(--font-weight-medium);
@@ -1067,6 +1120,10 @@ body {
 .viz-toolbar__field {
   flex: 1 1 14rem;
   min-width: 12rem;
+}
+
+.viz-toolbar__field[hidden] {
+  display: none;
 }
 
 .viz-toolbar__field .label {
@@ -1666,7 +1723,7 @@ body {
     order: 2;
   }
 
-  .viz-toggle {
+  .viz-params__toggles {
     margin-left: 0;
   }
 }

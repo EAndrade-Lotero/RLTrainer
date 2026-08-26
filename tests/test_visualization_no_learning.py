@@ -85,5 +85,42 @@ class CliffWalkingVisualizationNoLearningTests(unittest.TestCase):
         )
 
 
+class CliffWalkingVisualizationLearningTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = app.test_client()
+        response = self.client.post("/api/config", json=CONFIG)
+        self.assertEqual(response.status_code, 200, response.get_json())
+
+    def _q_table(self) -> np.ndarray:
+        payload = self.client.get("/api/agent/q-table").get_json()
+        return np.asarray(payload["q_table"], dtype=float)
+
+    def test_run_an_action_updates_q_table_when_learning_allowed(self) -> None:
+        before = self._q_table()
+        response = self.client.post(
+            "/api/environment/run-action",
+            json={"action": 0, "allow_learning": True},
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        after = self._q_table()
+        self.assertFalse(
+            np.allclose(after, before),
+            "Q-table did not change after Run an action with learning allowed",
+        )
+
+    def test_run_episode_updates_q_table_when_learning_allowed(self) -> None:
+        before = self._q_table()
+        response = self.client.post(
+            "/api/environment/run-episode",
+            json={"action": "policy", "allow_learning": True},
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        after = self._q_table()
+        self.assertFalse(
+            np.allclose(after, before),
+            "Q-table did not change after Run episode with learning allowed",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -131,7 +131,21 @@ DEFAULT_CONFIG = {
     "exploration_probability": 0.1,
     "discount_factor": DEFAULT_GAMMA,
     "training_episodes": DEFAULT_TRAINING_EPISODES,
+    "max_timesteps": DEFAULT_MAX_TIMESTEPS,
+    "allow_learning": False,
 }
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
 
 
 def get_config():
@@ -156,7 +170,10 @@ def config_for_template(config):
         "action_space": space.get("action_space"),
         "states": space.get("states", ""),
         "actions": space.get("actions", ""),
-        "max_timesteps": DEFAULT_MAX_TIMESTEPS,
+        "max_timesteps": int(
+            config.get("max_timesteps", DEFAULT_MAX_TIMESTEPS)
+        ),
+        "allow_learning": _as_bool(config.get("allow_learning")),
     }
 
 
@@ -192,6 +209,7 @@ def api_config():
     if agent not in AGENT_LABELS:
         return jsonify({"error": "Unknown agent"}), 400
 
+    current = get_config()
     try:
         learning_rate = float(data.get("learning_rate", DEFAULT_CONFIG["learning_rate"]))
         exploration_probability = float(
@@ -203,10 +221,24 @@ def api_config():
         discount_factor = float(
             data.get("discount_factor", DEFAULT_CONFIG["discount_factor"])
         )
+        max_timesteps = int(
+            data.get(
+                "max_timesteps",
+                current.get("max_timesteps", DEFAULT_CONFIG["max_timesteps"]),
+            )
+        )
+        allow_learning = _as_bool(
+            data.get("allow_learning"),
+            default=_as_bool(current.get("allow_learning")),
+        )
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid hyperparameter values"}), 400
 
-    current = get_config()
+    if max_timesteps < 1:
+        return jsonify({"error": "Timesteps must be at least 1."}), 400
+    if max_timesteps > 10_000:
+        return jsonify({"error": "Timesteps must be at most 10000."}), 400
+
     identity_changed = (
         current.get("environment") != environment or current.get("agent") != agent
     )
@@ -219,6 +251,8 @@ def api_config():
         "training_episodes": current.get(
             "training_episodes", DEFAULT_CONFIG["training_episodes"]
         ),
+        "max_timesteps": max_timesteps,
+        "allow_learning": allow_learning,
     }
     if identity_changed:
         reset_experiment_runtime(session)
@@ -267,11 +301,18 @@ def api_environment_run_episode():
     action_choice = data.get("action", "policy")
     if action_choice == "manual":
         action_choice = data.get("manual_action")
+    allow_learning = _as_bool(
+        data.get("allow_learning"),
+        default=_as_bool(config.get("allow_learning")),
+    )
 
     try:
         runtime = get_or_create_runtime(session, config, need_agent=True)
         payload = run_until_max_timesteps(
-            runtime, DEFAULT_MAX_TIMESTEPS, action_choice
+            runtime,
+            int(config.get("max_timesteps", DEFAULT_MAX_TIMESTEPS)),
+            action_choice,
+            allow_learning=allow_learning,
         )
     except Exception as exc:  # noqa: BLE001 - surface Gymnasium / agent errors to the UI
         return jsonify({"error": str(exc)}), 500
@@ -295,10 +336,16 @@ def api_environment_run_action():
     action_choice = data.get("action", "policy")
     if action_choice == "manual":
         action_choice = data.get("manual_action")
+    allow_learning = _as_bool(
+        data.get("allow_learning"),
+        default=_as_bool(config.get("allow_learning")),
+    )
 
     try:
         runtime = get_or_create_runtime(session, config, need_agent=True)
-        payload = run_single_action(runtime, action_choice)
+        payload = run_single_action(
+            runtime, action_choice, allow_learning=allow_learning
+        )
     except Exception as exc:  # noqa: BLE001 - surface Gymnasium / agent errors to the UI
         return jsonify({"error": str(exc)}), 500
     return jsonify(payload)
@@ -488,6 +535,9 @@ def api_training_start():
     data = request.get_json(silent=True) or {}
     try:
         episodes = int(data.get("episodes", config.get("training_episodes", DEFAULT_TRAINING_EPISODES)))
+        max_timesteps = int(
+            data.get("max_timesteps", config.get("max_timesteps", DEFAULT_MAX_TIMESTEPS))
+        )
         learning_rate = float(data.get("learning_rate", config["learning_rate"]))
         exploration_probability = float(
             data.get("exploration_probability", config["exploration_probability"])
@@ -497,7 +547,11 @@ def api_training_start():
         return jsonify({"error": "Invalid training configuration values."}), 400
 
     if episodes < 1:
-        return jsonify({"error": "Episodes must be at least 1."}), 400
+        return jsonify({"error": "Timesteps must be at least 1."}), 400
+    if max_timesteps < 1:
+        return jsonify({"error": "Timesteps must be at least 1."}), 400
+    if max_timesteps > 10_000:
+        return jsonify({"error": "Timesteps must be at most 10000."}), 400
     if not 0 <= learning_rate <= 1:
         return jsonify({"error": "Learning rate must be between 0 and 1."}), 400
     if not 0 <= exploration_probability <= 1:
@@ -511,6 +565,7 @@ def api_training_start():
         "exploration_probability": exploration_probability,
         "discount_factor": discount_factor,
         "training_episodes": episodes,
+        "max_timesteps": max_timesteps,
     }
     reset_experiment_runtime(session)
 
@@ -564,7 +619,9 @@ def api_training_episode():
     try:
         runtime = get_or_create_runtime(session, config, need_agent=True)
         apply_agent_hyperparameters(runtime, config)
-        payload = run_training_episode(runtime, DEFAULT_MAX_TIMESTEPS)
+        payload = run_training_episode(
+            runtime, int(config.get("max_timesteps", DEFAULT_MAX_TIMESTEPS))
+        )
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 

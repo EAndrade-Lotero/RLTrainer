@@ -8,7 +8,7 @@ import io
 import json
 import secrets
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -21,6 +21,16 @@ from gymnasium.spaces import Box, Discrete, Tuple
 DEFAULT_MAX_TIMESTEPS = 100
 DEFAULT_GAMMA = 0.99
 DEFAULT_TRAINING_EPISODES = 100
+
+
+def _max_timesteps(runtime: dict[str, Any]) -> int:
+    try:
+        value = int(
+            (runtime.get("config") or {}).get("max_timesteps", DEFAULT_MAX_TIMESTEPS)
+        )
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_TIMESTEPS
+    return max(1, value)
 
 TABULAR_AGENTS = {
     "MC": MC,
@@ -91,6 +101,17 @@ def _without_learning(agent) -> Iterator[None]:
         yield
     finally:
         _restore_learned_state(agent, snapshot)
+
+
+def _learning_guard(agent, allow_learning: bool):
+    if allow_learning:
+        return nullcontext()
+    return _without_learning(agent)
+
+
+def _apply_update(agent, next_state, reward, done, allow_learning: bool) -> None:
+    if allow_learning:
+        agent.update(next_state, reward, done)
 
 
 def _reset_agent_knowledge(agent) -> None:
@@ -552,7 +573,7 @@ def reset_environment(runtime: dict[str, Any], seed: int | None = 0) -> dict:
         "info": {key: _serialize_observation(value) for key, value in info.items()},
         "image": _frame_to_data_url(frame),
         "timestep": 0,
-        "max_timesteps": DEFAULT_MAX_TIMESTEPS,
+        "max_timesteps": _max_timesteps(runtime),
         "accumulated_reward": 0.0,
         "q_values": _state_q_values(runtime, observation),
     }
@@ -586,17 +607,21 @@ def _resolve_action(runtime: dict[str, Any], action_choice: Any):
     raise ValueError("Unsupported action space.")
 
 
-def run_single_action(runtime: dict[str, Any], action_choice: Any = "policy") -> dict:
-    """Take one environment step without updating the Q-table."""
+def run_single_action(
+    runtime: dict[str, Any],
+    action_choice: Any = "policy",
+    allow_learning: bool = False,
+) -> dict:
+    """Take one environment step. Updates the Q-table only if allow_learning."""
     env = runtime["env"]
     agent = runtime.get("agent")
 
     if agent is None:
         raise ValueError("Run an action currently requires a tabular agent.")
 
-    with _without_learning(agent):
+    with _learning_guard(agent, allow_learning):
         # Start a fresh episode if needed or if the timestep budget was exhausted.
-        if not agent.states or runtime.get("timestep", 0) >= DEFAULT_MAX_TIMESTEPS:
+        if not agent.states or runtime.get("timestep", 0) >= _max_timesteps(runtime):
             reset_environment(runtime, seed=None)
 
         action = _resolve_action(runtime, action_choice)
@@ -608,6 +633,7 @@ def run_single_action(runtime: dict[str, Any], action_choice: Any = "policy") ->
         done = bool(terminated or truncated)
         next_state = encode_observation(observation, env.observation_space)
 
+        _apply_update(agent, next_state, reward, done, allow_learning)
         agent.rewards.append(reward)
         agent.dones.append(done)
 
@@ -639,7 +665,7 @@ def run_single_action(runtime: dict[str, Any], action_choice: Any = "policy") ->
 
     payload = {
         "timestep": runtime["timestep"],
-        "max_timesteps": DEFAULT_MAX_TIMESTEPS,
+        "max_timesteps": _max_timesteps(runtime),
         "accumulated_reward": runtime["accumulated_reward"],
         "reward": float(reward),
         "done": done,
@@ -660,20 +686,21 @@ def run_until_max_timesteps(
     runtime: dict[str, Any],
     max_timesteps: int = DEFAULT_MAX_TIMESTEPS,
     action_choice: Any = "policy",
+    allow_learning: bool = False,
 ) -> dict:
     """
-    Run up to max_timesteps environment steps without learning.
+    Run up to max_timesteps environment steps.
 
-    Uses the selected action (or the frozen agent policy) at every step.
+    Uses the selected action (or the agent policy) at every step.
     When an episode ends (terminated or truncated), restart the env and agent
-    episode buffers. The Q-table is not modified.
+    episode buffers. The Q-table is updated only if allow_learning is True.
     """
     env = runtime["env"]
     agent = runtime.get("agent")
     if agent is None:
         raise ValueError("No tabular agent is available for this configuration.")
 
-    with _without_learning(agent):
+    with _learning_guard(agent, allow_learning):
         initial = reset_environment(runtime, seed=None)
         frames = [
             {
@@ -699,6 +726,7 @@ def run_until_max_timesteps(
             done = bool(terminated or truncated)
             next_state = encode_observation(observation, env.observation_space)
 
+            _apply_update(agent, next_state, reward, done, allow_learning)
             agent.rewards.append(reward)
             agent.dones.append(done)
 
@@ -789,7 +817,6 @@ def run_training_episode(
     Run one training episode with the tabular agent.
 
     Uses the agent's policy, steps the environment, and updates Q-values.
-    Visualization runners do not learn; only this training path does.
     """
     env = runtime["env"]
     agent = runtime.get("agent")

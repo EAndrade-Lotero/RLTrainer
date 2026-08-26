@@ -17,21 +17,22 @@
       <header class="training-card__header">
         <h2 class="training-card__title" id="training-config-title">Training Configuration</h2>
         <p class="training-card__subtitle">
-          Set the episode budget and learning hyperparameters before starting a run.
+          Set the timestep budget and learning hyperparameters before starting a run.
         </p>
       </header>
 
       <form class="training-form" id="training-form" novalidate>
         <div class="training-fields">
           <div class="setup-field">
-            <label class="label" for="episodes">Episodes</label>
+            <label class="label" for="timesteps">Timesteps</label>
             <input
               type="number"
-              id="episodes"
-              name="episodes"
+              id="timesteps"
+              name="timesteps"
               class="input"
-              value="{{ config.training_episodes or default_episodes }}"
+              value="{{ config.max_timesteps or config.training_episodes or default_episodes }}"
               min="1"
+              max="10000"
               step="1"
               required
             >
@@ -108,7 +109,7 @@
 
       <div class="training-progress">
         <div class="training-progress__row">
-          <span class="training-progress__label">Episode</span>
+          <span class="training-progress__label">Timestep</span>
           <span class="training-progress__value font-mono" id="episode-progress">0 / 0</span>
         </div>
         <div
@@ -135,23 +136,23 @@
       <header class="training-card__header">
         <h2 class="training-card__title" id="training-metrics-title">Training Metrics</h2>
         <p class="training-card__subtitle">
-          Episode reward from completed training episodes.
+          Reward from completed training timesteps.
         </p>
       </header>
 
       <div class="training-metrics">
         <div class="training-metrics__header">
-          <h3 class="training-metrics__chart-title">Episode Reward</h3>
+          <h3 class="training-metrics__chart-title">Reward</h3>
           <p class="training-metrics__summary font-mono" id="metrics-summary">No data yet</p>
         </div>
-        <div class="training-chart" id="reward-chart" aria-label="Episode reward chart">
+        <div class="training-chart" id="reward-chart" aria-label="Training reward chart">
           <svg class="training-chart__svg" viewBox="0 0 640 240" preserveAspectRatio="none" aria-hidden="true">
             <line class="training-chart__grid" x1="48" y1="24" x2="48" y2="200"></line>
             <line class="training-chart__grid" x1="48" y1="200" x2="616" y2="200"></line>
             <polyline class="training-chart__line" id="reward-line" fill="none" points=""></polyline>
           </svg>
           <p class="training-chart__empty" id="chart-empty">
-            Metrics will appear when training produces episode rewards.
+            Metrics will appear when training produces rewards.
           </p>
         </div>
       </div>
@@ -165,7 +166,7 @@
     const form = document.getElementById("training-form");
     const startButton = document.getElementById("start-training");
     const feedback = document.getElementById("training-feedback");
-    const episodesInput = document.getElementById("episodes");
+    const timestepsInput = document.getElementById("timesteps");
     const learningRateInput = document.getElementById("learning-rate");
     const discountInput = document.getElementById("discount-factor");
     const explorationInput = document.getElementById("exploration");
@@ -176,7 +177,7 @@
     const metricsSummary = document.getElementById("metrics-summary");
     const rewardLine = document.getElementById("reward-line");
     const chartEmpty = document.getElementById("chart-empty");
-    const formControls = [episodesInput, learningRateInput, discountInput, explorationInput, startButton];
+    const formControls = [timestepsInput, learningRateInput, discountInput, explorationInput, startButton];
 
     let episodeRewards = [];
     let trainingActive = false;
@@ -214,13 +215,13 @@
     }
 
     function validateConfig() {
-      const episodes = Number(episodesInput.value);
+      const timesteps = Number(timestepsInput.value);
       const learningRate = Number(learningRateInput.value);
       const discount = Number(discountInput.value);
       const exploration = Number(explorationInput.value);
 
-      if (!Number.isInteger(episodes) || episodes < 1) {
-        return "Episodes must be an integer greater than or equal to 1.";
+      if (!Number.isInteger(timesteps) || timesteps < 1 || timesteps > 10000) {
+        return "Timesteps must be an integer between 1 and 10000.";
       }
       if (Number.isNaN(learningRate) || learningRate < 0 || learningRate > 1) {
         return "Learning rate must be between 0 and 1.";
@@ -249,7 +250,7 @@
       }
       const latest = rewards[rewards.length - 1];
       const mean = rewards.reduce((sum, value) => sum + value, 0) / rewards.length;
-      metricsSummary.textContent = `Latest: ${latest.toFixed(2)} · Mean: ${mean.toFixed(2)} · Episodes: ${rewards.length}`;
+      metricsSummary.textContent = `Latest: ${latest.toFixed(2)} · Mean: ${mean.toFixed(2)} · Timesteps: ${rewards.length}`;
     }
 
     function renderRewardChart(rewards) {
@@ -296,11 +297,11 @@
         return;
       }
 
-      const totalEpisodes = Number(episodesInput.value);
+      const totalTimesteps = Number(timestepsInput.value);
       trainingActive = true;
       episodeRewards = [];
       renderRewardChart(episodeRewards);
-      updateProgress(0, totalEpisodes);
+      updateProgress(0, totalTimesteps);
       setControlsDisabled(true);
       setFeedback("", null);
       setStatus("training", "Training");
@@ -309,7 +310,8 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          episodes: totalEpisodes,
+          episodes: totalTimesteps,
+          max_timesteps: totalTimesteps,
           learning_rate: learningRateInput.value,
           discount_factor: discountInput.value,
           exploration_probability: explorationInput.value,
@@ -332,13 +334,13 @@
       }
 
       try {
-        for (let episode = 1; episode <= totalEpisodes; episode += 1) {
+        for (let episode = 1; episode <= totalTimesteps; episode += 1) {
           const response = await fetch("{{ url_for('api_training_episode') }}", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               episode,
-              total_episodes: totalEpisodes,
+              total_episodes: totalTimesteps,
             }),
           });
 
@@ -354,13 +356,13 @@
           }
 
           episodeRewards.push(Number(data.episode_reward));
-          updateProgress(episode, totalEpisodes);
+          updateProgress(episode, totalTimesteps);
           renderRewardChart(episodeRewards);
         }
 
         setStatus("completed", "Completed");
         setFeedback(
-          `Training finished. Completed ${totalEpisodes} episode${totalEpisodes === 1 ? "" : "s"}.`,
+          `Training finished. Completed ${totalTimesteps} timestep${totalTimesteps === 1 ? "" : "s"}.`,
           "success"
         );
       } catch (error) {
@@ -372,7 +374,7 @@
       }
     }
 
-    updateProgress(0, Number(episodesInput.value) || 0);
+    updateProgress(0, Number(timestepsInput.value) || 0);
     setStatus("ready", "Ready");
     renderRewardChart(episodeRewards);
     form.addEventListener("submit", startTraining);
