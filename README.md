@@ -1,8 +1,7 @@
-# Telemetría RL
+# Entrenamiento de agentes RL
 
-Dashboard en Flask para visualizar y medir el desempeño de un agente de
-aprendizaje por refuerzo (Q-learning tabular) entrenando en un entorno
-GridWorld.
+Plataforma para visualizar el desempeño de un agente de
+aprendizaje por refuerzo, entrenando en diversos entornos.
 
 ## Instalación
 
@@ -43,11 +42,4 @@ static/js/main.js       # sondeo del estado, render del entorno y gráficas
 
 ## Cómo extender
 
-- **Otro entorno**: crea una clase con `reset()`, `step(action)` y
-  `snapshot()` en `rl/environment.py` (o un módulo nuevo) e inyéctala en
-  `Trainer._build`.
-- **Otro agente**: implementa `act(state)` y `learn(...)` con la misma
-  firma que `QLearningAgent` en `rl/agent.py`.
-- **Tiempo real más fino**: si necesitas actualizaciones por debajo de los
-  200 ms del sondeo actual, se puede sustituir `fetch` por WebSockets
-  (Flask-SocketIO) sin cambiar el resto de la arquitectura.
+En creación...
