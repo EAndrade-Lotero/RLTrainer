@@ -1,0 +1,926 @@
+{% extends "base.html" %}
+
+{% block title %}Visualization — RL Trainer{% endblock %}
+
+{% block page_title %}Visualization{% endblock %}
+
+{% block page_description %}
+  <p class="page-description">
+    Watch the agent interact with the configured environment. Run a full episode
+    or step through actions one at a time.
+  </p>
+{% endblock %}
+
+{% block content %}
+  <div class="viz-workspace">
+    <div class="viz-params">
+      <div class="viz-params__item">
+        <label class="viz-params__label" for="config-lr">Learning rate</label>
+        <input
+          type="number"
+          id="config-lr"
+          class="input viz-params__input"
+          value="{{ config.learning_rate }}"
+          min="0"
+          max="1"
+          step="0.01"
+        >
+      </div>
+      <div class="viz-params__item">
+        <label class="viz-params__label" for="config-eps">Exploration</label>
+        <input
+          type="number"
+          id="config-eps"
+          class="input viz-params__input"
+          value="{{ config.exploration_probability }}"
+          min="0"
+          max="1"
+          step="0.01"
+        >
+      </div>
+      <div class="viz-params__item">
+        <label class="viz-params__label" for="config-timesteps">Timesteps</label>
+        <input
+          type="number"
+          id="config-timesteps"
+          class="input viz-params__input"
+          value="{{ config.max_timesteps }}"
+          min="1"
+          max="10000"
+          step="1"
+        >
+      </div>
+      <div class="viz-params__item" id="temperature-item" hidden>
+        <label class="viz-params__label" for="config-temperature">Temperature</label>
+        <input
+          type="number"
+          id="config-temperature"
+          class="input viz-params__input"
+          value="1"
+          min="0.01"
+          max="100"
+          step="0.01"
+        >
+      </div>
+      <div class="viz-params__toggles">
+        <label class="viz-toggle" for="allow-learning">
+          <input
+            type="checkbox"
+            id="allow-learning"
+            {% if config.allow_learning %}checked{% endif %}
+          >
+          <span>Allow learning</span>
+        </label>
+        <div class="viz-params__item">
+          <label class="viz-params__label" for="chart-mode">Chart</label>
+          <select id="chart-mode" class="select viz-params__select" aria-label="Chart">
+            <option value="none">Environment only</option>
+            <option value="q" selected>Q values</option>
+            <option value="epsilon">ε-greedy policy</option>
+            <option value="softmax">Softmax</option>
+          </select>
+        </div>
+      </div>
+      <p
+        class="viz-params__status"
+        id="config-feedback"
+        role="status"
+        aria-live="polite"
+        hidden
+      ></p>
+    </div>
+
+    <div class="viz-layout">
+      <section class="viz-stage" aria-label="Environment visualization">
+        <div class="viz-stage__row">
+          <div class="viz-render" id="env-render">
+            <span class="viz-render-placeholder">Loading environment…</span>
+            <img id="env-frame" class="viz-frame" alt="Environment render" hidden>
+          </div>
+
+          <aside class="viz-qchart" id="q-chart-panel" aria-labelledby="q-chart-title">
+            <header class="viz-qchart__header">
+              <h2 class="viz-qchart__title" id="q-chart-title">Q values</h2>
+              <p class="viz-qchart__subtitle" id="q-chart-subtitle">Current state</p>
+            </header>
+            <div class="viz-qchart__plot" id="q-chart-plot" role="img" hidden></div>
+            <p class="viz-qchart__empty" id="q-chart-empty">
+              Q values are not available for this agent or state.
+            </p>
+          </aside>
+        </div>
+
+        <div class="viz-toolbar">
+          <button type="button" class="btn btn--primary" id="run-episode">
+            <svg class="nav-icon" id="run-episode-icon-play" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="6 3 20 12 6 21 6 3"></polygon>
+              <line x1="20" y1="3" x2="20" y2="21"></line>
+            </svg>
+            <svg class="nav-icon is-hidden" id="run-episode-icon-stop" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor" hidden>
+              <rect x="6" y="6" width="12" height="12" rx="1"></rect>
+            </svg>
+            <span id="run-episode-label">Run episode</span>
+          </button>
+          <button type="button" class="btn btn--secondary" id="run-action">
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="6 3 20 12 6 21 6 3"></polygon>
+            </svg>
+            Run an action
+          </button>
+          <div class="viz-toolbar__field" id="discrete-action-field">
+            <label class="label" for="action-to-run">Action to run</label>
+            <select id="action-to-run" class="select" aria-label="Action to run"></select>
+          </div>
+          <div class="viz-toolbar__field" id="continuous-action-field" hidden>
+            <label class="label" for="continuous-action">Action to run</label>
+            <input
+              type="number"
+              id="continuous-action"
+              class="input"
+              step="0.01"
+              aria-label="Continuous action value"
+            >
+            <p class="helper-text" id="continuous-action-hint"></p>
+          </div>
+        </div>
+      </section>
+
+      <aside class="viz-sidebar">
+        <section class="viz-card" aria-labelledby="env-info-title">
+          <h2 class="viz-card__title" id="env-info-title">Environment Info</h2>
+          <dl class="viz-facts">
+            <div class="viz-fact">
+              <dt>State</dt>
+              <dd id="info-state" class="font-mono">—</dd>
+            </div>
+            <div class="viz-fact">
+              <dt>Action</dt>
+              <dd id="info-action">—</dd>
+            </div>
+            <div class="viz-fact">
+              <dt>Reward</dt>
+              <dd id="info-reward" class="font-mono">—</dd>
+            </div>
+            <div class="viz-fact">
+              <dt>Timestep</dt>
+              <dd id="timestep-label" class="font-mono">0 / {{ config.max_timesteps }}</dd>
+            </div>
+            <div class="viz-fact">
+              <dt>Accumulated reward</dt>
+              <dd id="reward-label" class="font-mono">0</dd>
+            </div>
+          </dl>
+
+          <div class="viz-stepper">
+            <button type="button" class="btn btn--secondary" id="prev-frame" disabled>
+              Previous
+            </button>
+            <button type="button" class="btn btn--secondary" id="next-frame" disabled>
+              Next
+            </button>
+          </div>
+          <p class="helper-text" id="frame-position">No episode frames yet</p>
+        </section>
+      </aside>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    const config = {{ config | tojson }};
+    const ACTION_LABELS = {
+      "Blackjack-v1": ["Stick", "Hit"],
+      "Taxi-v3": ["South", "North", "East", "West", "Pickup", "Dropoff"],
+      "FrozenLake-v1": ["Left", "Down", "Right", "Up"],
+      "CliffWalking-v1": ["Up", "Right", "Down", "Left"],
+      "Acrobot-v1": ["Torque −1", "Torque 0", "Torque +1"],
+      "CartPole-v1": ["Left", "Right"],
+      "MountainCar-v0": ["Left", "Neutral", "Right"],
+    };
+
+    const actionSelect = document.getElementById("action-to-run");
+    const continuousAction = document.getElementById("continuous-action");
+    const discreteActionField = document.getElementById("discrete-action-field");
+    const continuousActionField = document.getElementById("continuous-action-field");
+    const continuousActionHint = document.getElementById("continuous-action-hint");
+    const timestepLabel = document.getElementById("timestep-label");
+    const rewardLabel = document.getElementById("reward-label");
+    const infoState = document.getElementById("info-state");
+    const infoAction = document.getElementById("info-action");
+    const infoReward = document.getElementById("info-reward");
+    const framePosition = document.getElementById("frame-position");
+    const envRender = document.getElementById("env-render");
+    const envFrame = document.getElementById("env-frame");
+    const runEpisodeButton = document.getElementById("run-episode");
+    const runEpisodeLabel = document.getElementById("run-episode-label");
+    const runEpisodeIconPlay = document.getElementById("run-episode-icon-play");
+    const runEpisodeIconStop = document.getElementById("run-episode-icon-stop");
+    const runActionButton = document.getElementById("run-action");
+    const prevFrameButton = document.getElementById("prev-frame");
+    const nextFrameButton = document.getElementById("next-frame");
+    const allowLearning = document.getElementById("allow-learning");
+    const chartModeSelect = document.getElementById("chart-mode");
+    const temperatureInput = document.getElementById("config-temperature");
+    const temperatureItem = document.getElementById("temperature-item");
+    const learningRateInput = document.getElementById("config-lr");
+    const explorationInput = document.getElementById("config-eps");
+    const timestepsInput = document.getElementById("config-timesteps");
+    const configFeedback = document.getElementById("config-feedback");
+    const qChartPanel = document.getElementById("q-chart-panel");
+    const qChartPlot = document.getElementById("q-chart-plot");
+    const qChartEmpty = document.getElementById("q-chart-empty");
+    const qChartTitle = document.getElementById("q-chart-title");
+    const qChartSubtitle = document.getElementById("q-chart-subtitle");
+    const FRAME_DELAY_MS = 120;
+
+    let animationTimer = null;
+    let episodeAbort = null;
+    let episodeBusy = false;
+    let stopRequested = false;
+    let episodeFrames = [];
+    let frameIndex = -1;
+    let maxTimesteps = config.max_timesteps || 100;
+    let latestQValues = null;
+    let agentQTable = null;
+    let lastStateIndex = null;
+
+    function setRunStatus(state, label) {
+      if (window.ExperimentContext) {
+        ExperimentContext.setStatus(state, label);
+      }
+    }
+
+    function setConfigFeedback(message, type) {
+      configFeedback.hidden = !message;
+      configFeedback.textContent = message || "";
+      configFeedback.classList.remove(
+        "viz-params__status--success",
+        "viz-params__status--error"
+      );
+      if (type) {
+        configFeedback.classList.add(`viz-params__status--${type}`);
+      }
+    }
+
+    async function saveHyperparameters() {
+      const learningRate = Number(learningRateInput.value);
+      const exploration = Number(explorationInput.value);
+      const timesteps = Number(timestepsInput.value);
+
+      if (!Number.isFinite(learningRate) || learningRate < 0 || learningRate > 1) {
+        setConfigFeedback("Learning rate must be between 0 and 1.", "error");
+        return;
+      }
+      if (!Number.isFinite(exploration) || exploration < 0 || exploration > 1) {
+        setConfigFeedback("Exploration must be between 0 and 1.", "error");
+        return;
+      }
+      if (!Number.isInteger(timesteps) || timesteps < 1 || timesteps > 10000) {
+        setConfigFeedback("Timesteps must be an integer between 1 and 10000.", "error");
+        return;
+      }
+
+      const response = await fetch("{{ url_for('api_config') }}", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          environment: config.environment,
+          agent: config.agent,
+          learning_rate: learningRate,
+          exploration_probability: exploration,
+          discount_factor: config.discount_factor,
+          max_timesteps: timesteps,
+          allow_learning: allowLearning.checked,
+        }),
+      });
+
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (error) {
+        data = {};
+      }
+
+      if (!response.ok) {
+        setConfigFeedback(data.error || "Could not update parameters.", "error");
+        return;
+      }
+
+      config.learning_rate = data.learning_rate;
+      config.exploration_probability = data.exploration_probability;
+      config.max_timesteps = data.max_timesteps;
+      config.allow_learning = Boolean(data.allow_learning);
+      learningRateInput.value = data.learning_rate;
+      explorationInput.value = data.exploration_probability;
+      timestepsInput.value = data.max_timesteps;
+      if (Object.prototype.hasOwnProperty.call(data, "allow_learning")) {
+        allowLearning.checked = Boolean(data.allow_learning);
+      }
+      maxTimesteps = data.max_timesteps || maxTimesteps;
+      const currentTimestep = (timestepLabel.textContent.split("/")[0] || "0").trim();
+      timestepLabel.textContent = `${currentTimestep} / ${maxTimesteps}`;
+      setConfigFeedback("Parameters updated.", "success");
+      qChartFromAgent(lastStateIndex);
+    }
+
+    function formatObservation(observation) {
+      if (observation === undefined || observation === null) {
+        return "—";
+      }
+      if (typeof observation === "number") {
+        return String(observation);
+      }
+      return JSON.stringify(observation);
+    }
+
+    function formatAction(action) {
+      if (action === undefined || action === null) {
+        return "—";
+      }
+      if (typeof action === "number" && Number.isInteger(action)) {
+        const labels = ACTION_LABELS[config.environment];
+        if (labels && labels[action] !== undefined) {
+          return `${labels[action]} (${action})`;
+        }
+        return `Action ${action}`;
+      }
+      return String(action);
+    }
+
+    function formatReward(reward) {
+      if (reward === undefined || reward === null) {
+        return "—";
+      }
+      const value = Number(reward);
+      if (Number.isNaN(value)) {
+        return String(reward);
+      }
+      if (value > 0) {
+        return `+${value}`;
+      }
+      return String(value);
+    }
+
+    function formatQ(value) {
+      const number = Number(value);
+      if (Number.isNaN(number)) {
+        return "—";
+      }
+      if (Object.is(number, -0)) {
+        return "0.00";
+      }
+      const abs = Math.abs(number);
+      if (abs !== 0 && abs < 0.01) {
+        return number.toExponential(1);
+      }
+      return number.toFixed(2);
+    }
+
+    function actionLabel(index) {
+      const labels = ACTION_LABELS[config.environment] || [];
+      if (labels[index] !== undefined) {
+        return labels[index];
+      }
+      return `A${index}`;
+    }
+
+    function stateIndexFromPayload(payload) {
+      if (payload && payload.q_values && Number.isInteger(payload.q_values.state_index)) {
+        return payload.q_values.state_index;
+      }
+      if (payload && Number.isInteger(payload.observation)) {
+        return payload.observation;
+      }
+      return null;
+    }
+
+    async function loadAgentQTable() {
+      const response = await fetch("{{ url_for('api_agent_q_table') }}", {
+        cache: "no-store",
+      });
+      const data = await response.json();
+      if (!response.ok || !Array.isArray(data.q_table)) {
+        agentQTable = null;
+        return;
+      }
+      agentQTable = data.q_table;
+    }
+
+    function formatProb(value) {
+      const number = Number(value);
+      if (Number.isNaN(number)) {
+        return "—";
+      }
+      return `${(number * 100).toFixed(1)}%`;
+    }
+
+    function softmax(values, temperature) {
+      const tau = Math.max(Number(temperature) || 0, 1e-8);
+      const scaled = values.map((value) => value / tau);
+      const peak = Math.max(...scaled);
+      const exps = scaled.map((value) => Math.exp(value - peak));
+      const total = exps.reduce((sum, value) => sum + value, 0);
+      if (!total) {
+        return values.map(() => 1 / values.length);
+      }
+      return exps.map((value) => value / total);
+    }
+
+    function epsilonGreedyPolicy(values, greedyActions, epsilon) {
+      const n = values.length;
+      if (!n) {
+        return [];
+      }
+      if (n === 1) {
+        return [1];
+      }
+      const eps = Math.min(1, Math.max(0, Number(epsilon) || 0));
+      const greedy = greedyActions.length ? greedyActions[0] : 0;
+      return values.map((_, index) => (
+        index === greedy ? 1 - eps : eps / (n - 1)
+      ));
+    }
+
+    function chartMode() {
+      return chartModeSelect.value;
+    }
+
+    function syncTemperatureField() {
+      temperatureItem.hidden = chartMode() !== "softmax";
+    }
+
+    function qChartFromAgent(stateIndex) {
+      lastStateIndex = stateIndex;
+      if (chartMode() === "none") {
+        renderQChart(null);
+        return;
+      }
+      if (!agentQTable || !Number.isInteger(stateIndex) || !agentQTable[stateIndex]) {
+        renderQChart(null);
+        return;
+      }
+      const row = agentQTable[stateIndex];
+      const numbers = row.map(Number);
+      let best = -Infinity;
+      numbers.forEach((value) => {
+        if (!Number.isNaN(value) && value > best) {
+          best = value;
+        }
+      });
+      const greedy = numbers
+        .map((value, index) => (value === best ? index : -1))
+        .filter((index) => index >= 0);
+      renderQChart({
+        state_index: stateIndex,
+        values: row,
+        greedy_actions: greedy,
+      });
+    }
+
+    function renderQChart(qPayload) {
+      if (qPayload !== undefined) {
+        latestQValues = qPayload;
+      }
+
+      const mode = chartMode();
+      if (mode === "none") {
+        qChartPanel.hidden = true;
+        return;
+      }
+
+      qChartPanel.hidden = false;
+      const qValues = latestQValues && Array.isArray(latestQValues.values)
+        ? latestQValues.values.map(Number)
+        : [];
+      const greedy = latestQValues && Array.isArray(latestQValues.greedy_actions)
+        ? latestQValues.greedy_actions
+        : [];
+
+      let title = "Q values";
+      let emptyMessage = "Q values are not available for this agent or state.";
+      let displayValues = qValues;
+      let kind = "q";
+      let highlighted = new Set(greedy);
+
+      if (mode === "epsilon") {
+        title = "ε-greedy policy";
+        emptyMessage = "Policy is not available for this agent or state.";
+        kind = "prob";
+        displayValues = qValues.length
+          ? epsilonGreedyPolicy(qValues, greedy, explorationInput.value)
+          : [];
+      } else if (mode === "softmax") {
+        title = "Softmax";
+        emptyMessage = "Softmax is not available for this agent or state.";
+        kind = "prob";
+        displayValues = qValues.length
+          ? softmax(qValues, temperatureInput.value)
+          : [];
+        if (displayValues.length) {
+          const bestProb = Math.max(...displayValues);
+          highlighted = new Set(
+            displayValues
+              .map((value, index) => (value === bestProb ? index : -1))
+              .filter((index) => index >= 0)
+          );
+        }
+      }
+
+      qChartTitle.textContent = title;
+      const stateIndex = latestQValues && latestQValues.state_index;
+      qChartSubtitle.textContent = Number.isInteger(stateIndex)
+        ? `State ${stateIndex}`
+        : "Current state";
+
+      if (!displayValues.length || displayValues.some((value) => Number.isNaN(value))) {
+        qChartPlot.hidden = true;
+        qChartPlot.innerHTML = "";
+        qChartEmpty.hidden = false;
+        qChartEmpty.textContent = emptyMessage;
+        return;
+      }
+
+      const minValue = kind === "prob" ? 0 : Math.min(0, ...displayValues);
+      const maxValue = kind === "prob" ? 1 : Math.max(0, ...displayValues);
+      const span = Math.max(maxValue - minValue, 1e-9);
+      const zeroPercent = ((0 - minValue) / span) * 100;
+      const formatValue = kind === "prob" ? formatProb : formatQ;
+
+      qChartEmpty.hidden = true;
+      qChartPlot.hidden = false;
+      qChartPlot.replaceChildren();
+      qChartPlot.setAttribute(
+        "aria-label",
+        `${title} for ${displayValues.map((value, index) => `${actionLabel(index)} ${formatValue(value)}`).join(", ")}`
+      );
+
+      displayValues.forEach((value, index) => {
+        const heightPercent = (Math.abs(value) / span) * 100;
+        const isNegative = value < 0;
+        const column = document.createElement("div");
+        column.className = "q-bar";
+        if (kind === "prob") {
+          column.classList.add("is-probability");
+        }
+        if (highlighted.has(index)) {
+          column.classList.add("is-greedy");
+        }
+
+        const valueLabel = document.createElement("span");
+        valueLabel.className = "q-bar__value";
+        valueLabel.textContent = formatValue(value);
+
+        const track = document.createElement("div");
+        track.className = "q-bar__track";
+
+        const zeroLine = document.createElement("div");
+        zeroLine.className = "q-bar__zero";
+        zeroLine.style.bottom = `${zeroPercent}%`;
+
+        const fill = document.createElement("div");
+        fill.className = isNegative ? "q-bar__fill is-negative" : "q-bar__fill is-positive";
+        fill.style.height = `${heightPercent}%`;
+        fill.style.bottom = isNegative
+          ? `${Math.max(zeroPercent - heightPercent, 0)}%`
+          : `${zeroPercent}%`;
+
+        const name = document.createElement("span");
+        name.className = "q-bar__label";
+        name.textContent = actionLabel(index);
+
+        track.append(zeroLine, fill);
+        column.append(valueLabel, track, name);
+        qChartPlot.appendChild(column);
+      });
+    }
+
+    function selectedActionPayload() {
+      if (config.action_space && config.action_space.type === "box") {
+        return {
+          action: "manual",
+          manual_action: continuousAction.value,
+          allow_learning: allowLearning.checked,
+        };
+      }
+      return { action: actionSelect.value, allow_learning: allowLearning.checked };
+    }
+
+    function populateActions(actionSpace) {
+      actionSelect.innerHTML = "";
+      const policyOption = document.createElement("option");
+      policyOption.value = "policy";
+      policyOption.textContent = "Agent policy (default)";
+      policyOption.selected = true;
+      actionSelect.appendChild(policyOption);
+
+      const isContinuous = actionSpace && actionSpace.type === "box";
+      discreteActionField.hidden = Boolean(isContinuous);
+      continuousActionField.hidden = !isContinuous;
+
+      if (isContinuous) {
+        continuousAction.min = actionSpace.low;
+        continuousAction.max = actionSpace.high;
+        continuousAction.value = ((actionSpace.low + actionSpace.high) / 2).toFixed(2);
+        continuousAction.placeholder = `${actionSpace.low} … ${actionSpace.high}`;
+        continuousActionHint.textContent = `Range: ${actionSpace.low} … ${actionSpace.high}`;
+        return;
+      }
+
+      if (!actionSpace || actionSpace.type !== "discrete") {
+        return;
+      }
+
+      const labels = ACTION_LABELS[config.environment] || [];
+      for (let i = 0; i < actionSpace.n; i++) {
+        const option = document.createElement("option");
+        option.value = String(i);
+        option.textContent = labels[i] ? `${labels[i]} (${i})` : `Action ${i}`;
+        actionSelect.appendChild(option);
+      }
+    }
+
+    function showMessage(message) {
+      const placeholder = envRender.querySelector(".viz-render-placeholder");
+      envFrame.hidden = true;
+      if (placeholder) {
+        placeholder.hidden = false;
+        placeholder.textContent = message;
+      }
+    }
+
+    function showFrame(imageDataUrl) {
+      const placeholder = envRender.querySelector(".viz-render-placeholder");
+      if (!imageDataUrl) {
+        showMessage("No render available for this environment.");
+        return;
+      }
+      envFrame.src = imageDataUrl;
+      envFrame.hidden = false;
+      if (placeholder) {
+        placeholder.hidden = true;
+      }
+    }
+
+    function updateStepper() {
+      const hasFrames = episodeFrames.length > 0;
+      prevFrameButton.disabled = !hasFrames || frameIndex <= 0;
+      nextFrameButton.disabled = !hasFrames || frameIndex >= episodeFrames.length - 1;
+      if (!hasFrames) {
+        framePosition.textContent = "No episode frames yet";
+        return;
+      }
+      framePosition.textContent = `Frame ${frameIndex + 1} of ${episodeFrames.length}`;
+    }
+
+    function updateInfo(payload) {
+      if (!payload) {
+        return;
+      }
+      maxTimesteps = payload.max_timesteps || maxTimesteps;
+      const timestep = payload.timestep ?? 0;
+      const accumulated = payload.accumulated_reward ?? 0;
+      timestepLabel.textContent = `${timestep} / ${maxTimesteps}`;
+      rewardLabel.textContent = String(accumulated);
+      infoState.textContent = formatObservation(payload.observation);
+      infoAction.textContent = formatAction(payload.action);
+      infoReward.textContent = formatReward(payload.reward);
+      qChartFromAgent(stateIndexFromPayload(payload));
+    }
+
+    function showFrameAt(index) {
+      if (index < 0 || index >= episodeFrames.length) {
+        return;
+      }
+      frameIndex = index;
+      const frame = episodeFrames[frameIndex];
+      updateInfo({
+        ...frame,
+        max_timesteps: maxTimesteps,
+      });
+      showFrame(frame.image);
+      updateStepper();
+    }
+
+    function setEpisodeControls(running) {
+      episodeBusy = running;
+      runEpisodeButton.classList.toggle("btn--primary", !running);
+      runEpisodeButton.classList.toggle("btn--secondary", running);
+      runEpisodeLabel.textContent = running ? "Stop episode" : "Run episode";
+      runEpisodeIconPlay.classList.toggle("is-hidden", running);
+      runEpisodeIconStop.classList.toggle("is-hidden", !running);
+      runEpisodeIconPlay.hidden = running;
+      runEpisodeIconStop.hidden = !running;
+      runActionButton.disabled = running;
+      if (running) {
+        prevFrameButton.disabled = true;
+        nextFrameButton.disabled = true;
+        return;
+      }
+      updateStepper();
+    }
+
+    function restoreVisibleFrame() {
+      if (episodeFrames.length && frameIndex >= 0) {
+        showFrameAt(Math.min(frameIndex, episodeFrames.length - 1));
+        return;
+      }
+      if (envFrame.getAttribute("src")) {
+        showFrame(envFrame.src);
+      }
+    }
+
+    function stopAnimation() {
+      if (animationTimer !== null) {
+        clearTimeout(animationTimer);
+        animationTimer = null;
+      }
+    }
+
+    function stopEpisode() {
+      stopRequested = true;
+      if (episodeAbort) {
+        episodeAbort.abort();
+        episodeAbort = null;
+      }
+      stopAnimation();
+      setEpisodeControls(false);
+      restoreVisibleFrame();
+      setRunStatus("ready", "Ready");
+    }
+
+    function onEpisodeButtonClick() {
+      if (episodeBusy) {
+        stopEpisode();
+        return;
+      }
+      runEpisode();
+    }
+
+    function playFrames(frames) {
+      stopAnimation();
+      episodeFrames = frames;
+      frameIndex = 0;
+      setRunStatus("ready", "Ready");
+
+      function showNext() {
+        if (stopRequested) {
+          setEpisodeControls(false);
+          updateStepper();
+          return;
+        }
+        showFrameAt(frameIndex);
+        if (frameIndex < episodeFrames.length - 1) {
+          animationTimer = setTimeout(() => {
+            frameIndex += 1;
+            showNext();
+          }, FRAME_DELAY_MS);
+        } else {
+          setEpisodeControls(false);
+          setRunStatus("ready", "Ready");
+        }
+      }
+
+      showNext();
+    }
+
+    async function loadInitialState() {
+      setRunStatus("ready", "Ready");
+      const response = await fetch("{{ url_for('api_environment_initial') }}");
+      const data = await response.json();
+      if (!response.ok) {
+        showMessage(data.error || "Could not load environment.");
+        setRunStatus("error", "Error");
+        return;
+      }
+      episodeFrames = [];
+      frameIndex = -1;
+      await loadAgentQTable();
+      updateInfo({
+        ...data,
+        action: null,
+        reward: null,
+      });
+      showFrame(data.image);
+      updateStepper();
+      setRunStatus("ready", "Ready");
+    }
+
+    async function runEpisode() {
+      stopRequested = false;
+      stopAnimation();
+      setEpisodeControls(true);
+      showMessage("Running episode…");
+      setRunStatus("ready", "Ready");
+
+      episodeAbort = new AbortController();
+      try {
+        const response = await fetch("{{ url_for('api_environment_run_episode') }}", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(selectedActionPayload()),
+          signal: episodeAbort.signal,
+        });
+        const data = await response.json();
+        if (stopRequested) {
+          return;
+        }
+        if (!response.ok) {
+          showMessage(data.error || "Could not run episode.");
+          setRunStatus("error", "Error");
+          setEpisodeControls(false);
+          return;
+        }
+        maxTimesteps = data.max_timesteps || maxTimesteps;
+        await loadAgentQTable();
+        if (stopRequested) {
+          return;
+        }
+        playFrames(data.frames);
+      } catch (error) {
+        if (error && error.name === "AbortError") {
+          return;
+        }
+        showMessage("Could not run episode.");
+        setRunStatus("error", "Error");
+        setEpisodeControls(false);
+      } finally {
+        episodeAbort = null;
+      }
+    }
+
+    async function runAction() {
+      stopAnimation();
+      runActionButton.disabled = true;
+      setRunStatus("ready", "Ready");
+
+      const response = await fetch("{{ url_for('api_environment_run_action') }}", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(selectedActionPayload()),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        showMessage(data.error || "Could not run action.");
+        setRunStatus("error", "Error");
+        runActionButton.disabled = false;
+        return;
+      }
+
+      episodeFrames = [];
+      frameIndex = -1;
+      await loadAgentQTable();
+      updateInfo(data);
+      showFrame(data.image);
+      updateStepper();
+
+      if (data.reset_after_done && data.next_image) {
+        setTimeout(async () => {
+          await loadAgentQTable();
+          updateInfo({
+            timestep: data.timestep,
+            max_timesteps: data.max_timesteps,
+            accumulated_reward: 0,
+            observation: data.next_observation,
+            action: null,
+            reward: null,
+            q_values: data.next_q_values,
+          });
+          showFrame(data.next_image);
+          setRunStatus("ready", "Ready");
+          runActionButton.disabled = false;
+        }, FRAME_DELAY_MS);
+        return;
+      }
+
+      setRunStatus("ready", "Ready");
+      runActionButton.disabled = false;
+    }
+
+    populateActions(config.action_space);
+    runEpisodeButton.addEventListener("click", onEpisodeButtonClick);
+    runActionButton.addEventListener("click", runAction);
+    prevFrameButton.addEventListener("click", () => showFrameAt(frameIndex - 1));
+    nextFrameButton.addEventListener("click", () => showFrameAt(frameIndex + 1));
+    chartModeSelect.addEventListener("change", () => {
+      syncTemperatureField();
+      qChartFromAgent(lastStateIndex);
+    });
+    temperatureInput.addEventListener("input", () => {
+      if (chartMode() === "softmax") {
+        qChartFromAgent(lastStateIndex);
+      }
+    });
+    explorationInput.addEventListener("input", () => {
+      if (chartMode() === "epsilon") {
+        qChartFromAgent(lastStateIndex);
+      }
+    });
+    allowLearning.addEventListener("change", saveHyperparameters);
+    learningRateInput.addEventListener("change", saveHyperparameters);
+    explorationInput.addEventListener("change", saveHyperparameters);
+    timestepsInput.addEventListener("change", saveHyperparameters);
+    syncTemperatureField();
+    loadInitialState();
+  </script>
+{% endblock %}

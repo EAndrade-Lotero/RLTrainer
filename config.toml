@@ -1,0 +1,12 @@
+# Project path configuration
+# All relative paths are resolved from the repository root.
+# Absolute paths are used as-is.
+
+[paths]
+# Persisted Q-tables (JSON) and Stable-Baselines3 models (.zip)
+saved_agents = "saved_agents"
+
+# Flask application layout
+static = "static"
+templates = "templates"
+src = "src"

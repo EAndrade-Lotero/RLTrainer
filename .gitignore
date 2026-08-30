@@ -37,3 +37,7 @@ htmlcov/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Saved agents (keep the directory, ignore artifacts)
+saved_agents/*
+!saved_agents/.gitkeep
