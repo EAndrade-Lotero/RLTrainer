@@ -34,7 +34,7 @@
         <select id="environment" name="environment" class="select" required>
           <optgroup label="Toy Text">
             <option value="Blackjack-v1">Blackjack</option>
-            <option value="Taxi-v3">Taxi</option>
+            <option value="Taxi-v4">Taxi</option>
             <option value="FrozenLake-v1">Frozen Lake</option>
             <option value="CliffWalking-v1">Cliff Walking</option>
           </optgroup>
@@ -283,37 +283,6 @@
       return !learningRateMessage && !explorationMessage;
     }
 
-    async function promptSaveAgent() {
-      const response = await fetch("{{ url_for('api_agent_export') }}", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-
-      if (response.status === 404) {
-        return { saved: false, skipped: true };
-      }
-
-      let data = {};
-      try {
-        data = await response.json();
-      } catch (error) {
-        data = {};
-      }
-
-      if (!response.ok) {
-        throw new Error(data.error || "Could not save the agent.");
-      }
-
-      return {
-        saved: true,
-        skipped: false,
-        path: data.path,
-        filename: data.filename,
-        kind: data.kind,
-      };
-    }
-
     async function saveConfig(event) {
       if (event) {
         event.preventDefault();
@@ -329,7 +298,22 @@
 
       let saveResult = { saved: false, skipped: true };
       try {
-        saveResult = await promptSaveAgent();
+        if (!window.SaveAgent) {
+          throw new Error("Could not inspect the current agent.");
+        }
+        const preview = await SaveAgent.fetchExportPreview();
+        if (preview.available) {
+          const choice = await SaveAgent.askSaveDestination(preview, {
+            confirmLabel: "Apply",
+            subtitle: SaveAgent.APPLY_SUBTITLE,
+            emptyFilenameMessage: "Enter a file name before applying.",
+          });
+          if (!choice) {
+            setStatus("Apply cancelled.", null);
+            return;
+          }
+          saveResult = await SaveAgent.promptSaveAgent(choice);
+        }
       } catch (error) {
         setStatus(error.message || "Could not save the agent.", "error");
         if (window.ExperimentContext) {

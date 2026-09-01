@@ -28,14 +28,27 @@
     </span>
   </div>
 
-  <div class="experiment-context__status">
-    <span
-      class="status-badge"
-      id="experiment-status"
-      data-state="{{ status }}"
-    >
-      <span class="status-badge__dot" aria-hidden="true"></span>
-      <span class="status-badge__label">{{ status_label }}</span>
-    </span>
+  <div class="experiment-context__actions">
+    <button type="button" class="btn btn--secondary" id="save-agent-button">
+      Save agent
+    </button>
+    <div class="experiment-context__status">
+      <span
+        class="status-badge"
+        id="experiment-status"
+        data-state="{{ status }}"
+      >
+        <span class="status-badge__dot" aria-hidden="true"></span>
+        <span class="status-badge__label">{{ status_label }}</span>
+      </span>
+    </div>
   </div>
+
+  <div
+    id="save-agent-status"
+    class="setup-status experiment-context__message"
+    role="status"
+    aria-live="polite"
+    hidden
+  ></div>
 </div>

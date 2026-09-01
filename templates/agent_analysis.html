@@ -103,13 +103,30 @@
         data-analysis-panel="policy"
         hidden
       >
-        <div class="analysis-unavailable">
+        <div class="analysis-panel__intro">
           <h3 class="analysis-panel__title">Policy</h3>
-          <p class="analysis-unavailable__badge">Unavailable</p>
-          <p class="text-secondary">
-            Policy visualization is not implemented yet. This tab is reserved for
-            future agent analysis views.
+          <p class="analysis-panel__subtitle">
+            Current action probabilities <span class="font-mono">π(a | s)</span> from
+            the stored policy (ε-greedy or softmax-updated table).
           </p>
+        </div>
+
+        <div id="policy-status" class="analysis-status" role="status" aria-live="polite">
+          Loading policy…
+        </div>
+
+        <div class="analysis-unavailable" id="policy-unavailable" hidden>
+          <p class="text-secondary" id="policy-unavailable-message"></p>
+        </div>
+
+        <div class="analysis-table-shell" id="policy-table-shell" hidden>
+          <div class="analysis-table-scroll" tabindex="0">
+            <table class="analysis-table" id="policy-table">
+              <caption class="sr-only">Policy probabilities for each state-action pair</caption>
+              <thead></thead>
+              <tbody id="policy-table-body"></tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -121,13 +138,30 @@
         data-analysis-panel="value"
         hidden
       >
-        <div class="analysis-unavailable">
+        <div class="analysis-panel__intro">
           <h3 class="analysis-panel__title">Value Function</h3>
-          <p class="analysis-unavailable__badge">Unavailable</p>
-          <p class="text-secondary">
-            Value-function visualization is not implemented yet. This tab is reserved
-            for future agent analysis views.
+          <p class="analysis-panel__subtitle">
+            State values derived from the Q-table as
+            <span class="font-mono">V(s) = max<sub>a</sub> Q(s, a)</span>.
           </p>
+        </div>
+
+        <div id="value-status" class="analysis-status" role="status" aria-live="polite">
+          Loading value function…
+        </div>
+
+        <div class="analysis-unavailable" id="value-unavailable" hidden>
+          <p class="text-secondary" id="value-unavailable-message"></p>
+        </div>
+
+        <div class="analysis-table-shell" id="value-table-shell" hidden>
+          <div class="analysis-table-scroll" tabindex="0">
+            <table class="analysis-table" id="value-table">
+              <caption class="sr-only">State values V(s) = max Q(s, a)</caption>
+              <thead></thead>
+              <tbody id="value-table-body"></tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -139,13 +173,59 @@
         data-analysis-panel="metrics"
         hidden
       >
-        <div class="analysis-unavailable">
+        <div class="analysis-panel__intro">
           <h3 class="analysis-panel__title">Metrics</h3>
-          <p class="analysis-unavailable__badge">Unavailable</p>
-          <p class="text-secondary">
-            Training and evaluation metrics are not implemented yet. This tab is
-            reserved for future agent analysis views.
+          <p class="analysis-panel__subtitle">
+            Average return of 10 evaluation episodes with exploration
+            <span class="font-mono">ε = 0</span> (greedy). Learning is disabled and
+            the session exploration hyperparameter is not changed.
           </p>
+        </div>
+
+        <div id="metrics-status" class="analysis-status" role="status" aria-live="polite">
+          Waiting to evaluate…
+        </div>
+
+        <div class="analysis-unavailable" id="metrics-unavailable" hidden>
+          <p class="text-secondary" id="metrics-unavailable-message"></p>
+        </div>
+
+        <div id="metrics-results" hidden>
+          <dl class="analysis-metrics">
+            <div class="setup-metric">
+              <dt>Mean return</dt>
+              <dd id="metrics-mean" class="setup-metric__value font-mono">—</dd>
+            </div>
+            <div class="setup-metric">
+              <dt>Std. deviation</dt>
+              <dd id="metrics-std" class="setup-metric__value font-mono">—</dd>
+            </div>
+            <div class="setup-metric">
+              <dt>Episodes</dt>
+              <dd id="metrics-count" class="setup-metric__value font-mono">—</dd>
+            </div>
+          </dl>
+
+          <div class="analysis-table-shell">
+            <div class="analysis-table-scroll" tabindex="0">
+              <table class="analysis-table" id="metrics-table">
+                <caption class="sr-only">Episode returns from greedy evaluation</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Episode</th>
+                    <th scope="col">Return</th>
+                  </tr>
+                </thead>
+                <tbody id="metrics-table-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="analysis-metrics__actions">
+          <button type="button" class="btn btn--secondary" id="metrics-run">
+            Run greedy evaluation
+          </button>
         </div>
       </div>
     </section>
@@ -157,7 +237,7 @@
     const config = {{ config | tojson }};
     const ACTION_LABELS = {
       "Blackjack-v1": ["Stick", "Hit"],
-      "Taxi-v3": ["South", "North", "East", "West", "Pickup", "Dropoff"],
+      "Taxi-v4": ["South", "North", "East", "West", "Pickup", "Dropoff"],
       "FrozenLake-v1": ["Left", "Down", "Right", "Up"],
       "CliffWalking-v1": ["Up", "Right", "Down", "Left"],
       "Acrobot-v1": ["Torque −1", "Torque 0", "Torque +1"],
@@ -167,9 +247,37 @@
 
     const tabs = Array.from(document.querySelectorAll("[data-analysis-tab]"));
     const panels = Array.from(document.querySelectorAll("[data-analysis-panel]"));
-    const statusEl = document.getElementById("q-table-status");
-    const tableShell = document.getElementById("q-table-shell");
-    const tableBody = document.getElementById("q-table-body");
+    const metricsRunButton = document.getElementById("metrics-run");
+
+    const views = {
+      "q-table": {
+        status: document.getElementById("q-table-status"),
+        shell: document.getElementById("q-table-shell"),
+        unavailable: null,
+        unavailableMessage: null,
+      },
+      policy: {
+        status: document.getElementById("policy-status"),
+        shell: document.getElementById("policy-table-shell"),
+        unavailable: document.getElementById("policy-unavailable"),
+        unavailableMessage: document.getElementById("policy-unavailable-message"),
+      },
+      value: {
+        status: document.getElementById("value-status"),
+        shell: document.getElementById("value-table-shell"),
+        unavailable: document.getElementById("value-unavailable"),
+        unavailableMessage: document.getElementById("value-unavailable-message"),
+      },
+      metrics: {
+        status: document.getElementById("metrics-status"),
+        shell: document.getElementById("metrics-results"),
+        unavailable: document.getElementById("metrics-unavailable"),
+        unavailableMessage: document.getElementById("metrics-unavailable-message"),
+      },
+    };
+
+    let analysisError = "";
+    let metricsLoaded = false;
 
     function formatQ(value) {
       const number = Number(value);
@@ -186,22 +294,45 @@
       return number.toFixed(2);
     }
 
+    let analysisPayload = null;
+
     function actionLabel(index) {
-      const labels = ACTION_LABELS[config.environment] || [];
+      const fromPayload = analysisPayload && Array.isArray(analysisPayload.action_labels)
+        ? analysisPayload.action_labels
+        : null;
+      const labels = fromPayload || ACTION_LABELS[config.environment] || [];
       return labels[index] || `A${index}`;
     }
 
-    function setStatus(message, type) {
-      statusEl.hidden = !message;
-      statusEl.textContent = message || "";
-      statusEl.classList.remove(
+    function setViewStatus(viewId, message, type) {
+      const view = views[viewId];
+      if (!view || !view.status) {
+        return;
+      }
+      view.status.hidden = !message;
+      view.status.textContent = message || "";
+      view.status.classList.remove(
         "analysis-status--error",
         "analysis-status--info",
         "analysis-status--success"
       );
       if (type) {
-        statusEl.classList.add(`analysis-status--${type}`);
+        view.status.classList.add(`analysis-status--${type}`);
       }
+    }
+
+    function showUnavailable(viewId, message) {
+      const view = views[viewId];
+      if (view.shell) {
+        view.shell.hidden = true;
+      }
+      if (view.unavailable) {
+        view.unavailable.hidden = false;
+        if (view.unavailableMessage) {
+          view.unavailableMessage.textContent = message;
+        }
+      }
+      setViewStatus(viewId, message, "error");
     }
 
     function activateTab(tabId) {
@@ -217,13 +348,15 @@
         panel.classList.toggle("is-active", selected);
         panel.hidden = !selected;
       });
+
+      if (tabId === "metrics" && !metricsLoaded && !analysisError) {
+        loadMetrics();
+      }
     }
 
-    function renderQTable(payload) {
-      const qTable = payload.q_table || [];
-      const nActions = payload.n_actions || 0;
-      const thead = document.querySelector("#q-table thead");
-
+    function renderMatrixTable(tableId, bodyId, matrix, nActions, groupLabel) {
+      const thead = document.querySelector(`#${tableId} thead`);
+      const tableBody = document.getElementById(bodyId);
       thead.innerHTML = "";
 
       const actionRow = document.createElement("tr");
@@ -238,12 +371,11 @@
       actionGroup.scope = "colgroup";
       actionGroup.colSpan = Math.max(nActions, 1);
       actionGroup.className = "analysis-table__action-group";
-      actionGroup.textContent = "Action";
+      actionGroup.textContent = groupLabel;
       actionRow.appendChild(actionGroup);
       thead.appendChild(actionRow);
 
       const labelRow = document.createElement("tr");
-      labelRow.id = "q-table-head";
       for (let action = 0; action < nActions; action += 1) {
         const th = document.createElement("th");
         th.scope = "col";
@@ -253,7 +385,7 @@
       thead.appendChild(labelRow);
 
       tableBody.innerHTML = "";
-      qTable.forEach((row, state) => {
+      matrix.forEach((row, state) => {
         const tr = document.createElement("tr");
         const th = document.createElement("th");
         th.scope = "row";
@@ -281,19 +413,160 @@
 
         tableBody.appendChild(tr);
       });
+    }
 
-      tableShell.hidden = false;
-      setStatus(
+    function renderQTable(payload) {
+      renderMatrixTable(
+        "q-table",
+        "q-table-body",
+        payload.q_table || [],
+        payload.n_actions || 0,
+        "Action"
+      );
+      views["q-table"].shell.hidden = false;
+      setViewStatus(
+        "q-table",
         `Showing ${payload.n_states} states × ${payload.n_actions} actions for ${payload.agent_label}.`,
         "info"
       );
     }
 
-    async function loadQTable() {
-      setStatus("Loading Q-table…", "info");
-      tableShell.hidden = true;
+    function renderPolicy(payload) {
+      const policy = payload.policy;
+      if (!policy || !policy.length) {
+        showUnavailable("policy", "The current agent does not expose a policy table.");
+        return;
+      }
+      if (views.policy.unavailable) {
+        views.policy.unavailable.hidden = true;
+      }
+      renderMatrixTable(
+        "policy-table",
+        "policy-table-body",
+        policy,
+        payload.n_actions || 0,
+        "π(a | s)"
+      );
+      views.policy.shell.hidden = false;
+      setViewStatus(
+        "policy",
+        `Showing the stored policy for ${payload.n_states} states × ${payload.n_actions} actions.`,
+        "info"
+      );
+    }
 
-      const response = await fetch("{{ url_for('api_agent_q_table') }}", {
+    function renderValue(payload) {
+      const values = payload.value || [];
+      const thead = document.querySelector("#value-table thead");
+      const tableBody = document.getElementById("value-table-body");
+      thead.innerHTML = "";
+
+      const headerRow = document.createElement("tr");
+      const stateHeader = document.createElement("th");
+      stateHeader.scope = "col";
+      stateHeader.className = "analysis-table__corner";
+      stateHeader.textContent = "State";
+      headerRow.appendChild(stateHeader);
+      const valueHeader = document.createElement("th");
+      valueHeader.scope = "col";
+      valueHeader.textContent = payload.value_definition || "V(s) = max_a Q(s, a)";
+      headerRow.appendChild(valueHeader);
+      thead.appendChild(headerRow);
+
+      tableBody.innerHTML = "";
+      let bestValue = -Infinity;
+      values.forEach((value) => {
+        const number = Number(value);
+        if (!Number.isNaN(number) && number > bestValue) {
+          bestValue = number;
+        }
+      });
+
+      values.forEach((value, state) => {
+        const tr = document.createElement("tr");
+        const th = document.createElement("th");
+        th.scope = "row";
+        th.textContent = String(state);
+        tr.appendChild(th);
+        const td = document.createElement("td");
+        const number = Number(value);
+        td.textContent = formatQ(value);
+        td.className = "font-mono";
+        if (!Number.isNaN(number) && number === bestValue) {
+          td.classList.add("is-best");
+        }
+        tr.appendChild(td);
+        tableBody.appendChild(tr);
+      });
+
+      if (views.value.unavailable) {
+        views.value.unavailable.hidden = true;
+      }
+      views.value.shell.hidden = false;
+      setViewStatus(
+        "value",
+        `Showing V(s) = max_a Q(s, a) for ${payload.n_states} states.`,
+        "info"
+      );
+    }
+
+    function renderMetrics(payload) {
+      const rewards = payload.rewards || [];
+      document.getElementById("metrics-mean").textContent = formatQ(payload.mean);
+      document.getElementById("metrics-std").textContent = formatQ(payload.std);
+      document.getElementById("metrics-count").textContent = String(
+        payload.n_episodes || rewards.length
+      );
+
+      const tableBody = document.getElementById("metrics-table-body");
+      tableBody.innerHTML = "";
+      rewards.forEach((reward, index) => {
+        const tr = document.createElement("tr");
+        const episode = document.createElement("th");
+        episode.scope = "row";
+        episode.textContent = String(index + 1);
+        const value = document.createElement("td");
+        value.className = "font-mono";
+        value.textContent = formatQ(reward);
+        tr.appendChild(episode);
+        tr.appendChild(value);
+        tableBody.appendChild(tr);
+      });
+
+      if (views.metrics.unavailable) {
+        views.metrics.unavailable.hidden = true;
+      }
+      views.metrics.shell.hidden = false;
+      setViewStatus(
+        "metrics",
+        `Mean return over ${payload.n_episodes} greedy episodes (ε = 0): ${formatQ(payload.mean)}.`,
+        "success"
+      );
+    }
+
+    function applyAnalysisError(message) {
+      analysisError = message;
+      showUnavailable("q-table", message);
+      showUnavailable("policy", message);
+      showUnavailable("value", message);
+      showUnavailable("metrics", message);
+      if (metricsRunButton) {
+        metricsRunButton.disabled = true;
+      }
+      if (window.ExperimentContext) {
+        ExperimentContext.setStatus("error", "Error");
+      }
+    }
+
+    async function loadAnalysis() {
+      setViewStatus("q-table", "Loading Q-table…", "info");
+      setViewStatus("policy", "Loading policy…", "info");
+      setViewStatus("value", "Loading value function…", "info");
+      views["q-table"].shell.hidden = true;
+      views.policy.shell.hidden = true;
+      views.value.shell.hidden = true;
+
+      const response = await fetch("{{ url_for('api_agent_analysis') }}", {
         cache: "no-store",
       });
       let data = {};
@@ -304,7 +577,51 @@
       }
 
       if (!response.ok) {
-        setStatus(data.error || "Could not load Q-table.", "error");
+        applyAnalysisError(data.error || "Could not load Q-table.");
+        return;
+      }
+
+      if (window.ExperimentContext) {
+        ExperimentContext.setEnvironment(data.environment, data.environment_label);
+        ExperimentContext.setAgent(data.agent, data.agent_label);
+        ExperimentContext.setStatus("ready", "Ready");
+      }
+      analysisPayload = data;
+      renderQTable(data);
+      renderPolicy(data);
+      renderValue(data);
+    }
+
+    async function loadMetrics() {
+      if (analysisError) {
+        return;
+      }
+      metricsLoaded = true;
+      setViewStatus("metrics", "Evaluating 10 greedy episodes (ε = 0)…", "info");
+      views.metrics.shell.hidden = true;
+      if (metricsRunButton) {
+        metricsRunButton.disabled = true;
+      }
+
+      const response = await fetch("{{ url_for('api_agent_evaluate') }}", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ n_episodes: 10 }),
+        cache: "no-store",
+      });
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (error) {
+        data = {};
+      }
+
+      if (metricsRunButton) {
+        metricsRunButton.disabled = false;
+      }
+
+      if (!response.ok) {
+        showUnavailable("metrics", data.error || "Could not evaluate the agent.");
         if (window.ExperimentContext) {
           ExperimentContext.setStatus("error", "Error");
         }
@@ -316,7 +633,7 @@
         ExperimentContext.setAgent(data.agent, data.agent_label);
         ExperimentContext.setStatus("ready", "Ready");
       }
-      renderQTable(data);
+      renderMetrics(data);
     }
 
     tabs.forEach((tab) => {
@@ -345,7 +662,18 @@
       activateTab(tabs[nextIndex].dataset.analysisTab);
     });
 
+    if (metricsRunButton) {
+      metricsRunButton.addEventListener("click", () => {
+        metricsLoaded = false;
+        loadMetrics().catch((error) => {
+          showUnavailable("metrics", error.message || "Could not evaluate the agent.");
+        });
+      });
+    }
+
     activateTab("q-table");
-    loadQTable();
+    loadAnalysis().catch((error) => {
+      applyAnalysisError(error.message || "Could not load Q-table.");
+    });
   </script>
 {% endblock %}

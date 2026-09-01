@@ -16,19 +16,25 @@ from env_runner import (
     DEFAULT_GAMMA,
     DEFAULT_MAX_TIMESTEPS,
     DEFAULT_TRAINING_EPISODES,
+    EVALUATION_EPISODES,
     apply_agent_hyperparameters,
+    default_agent_filename,
     describe_saved_agent,
+    evaluate_greedy_episodes,
+    get_analysis,
     get_cached_runtime,
     get_or_create_runtime,
     get_q_table,
     list_saved_agents,
     load_agent_from_disk,
+    normalize_export_filename,
     reset_environment,
     reset_experiment_runtime,
     run_single_action,
     run_training_episode,
     run_until_max_timesteps,
     save_agent_to_disk,
+    unique_saved_agent_filename,
     update_runtime_config,
 )
 from project_paths import REPO_ROOT, resolve_path, saved_agents_dir, safe_saved_agent_path
@@ -50,7 +56,7 @@ def _disable_api_caching(response):
 
 ENV_LABELS = {
     "Blackjack-v1": "Blackjack",
-    "Taxi-v3": "Taxi",
+    "Taxi-v4": "Taxi",
     "FrozenLake-v1": "Frozen Lake",
     "CliffWalking-v1": "Cliff Walking",
     "Acrobot-v1": "Acrobot",
@@ -67,6 +73,16 @@ AGENT_LABELS = {
     "drl-sb3": "DRL agents from stable baselines 3",
 }
 
+ACTION_LABELS = {
+    "Blackjack-v1": ["Stick", "Hit"],
+    "Taxi-v4": ["South", "North", "East", "West", "Pickup", "Dropoff"],
+    "FrozenLake-v1": ["Left", "Down", "Right", "Up"],
+    "CliffWalking-v1": ["Up", "Right", "Down", "Left"],
+    "Acrobot-v1": ["Torque −1", "Torque 0", "Torque +1"],
+    "CartPole-v1": ["Left", "Right"],
+    "MountainCar-v0": ["Left", "Neutral", "Right"],
+}
+
 # Observation / action space specs from Gymnasium docs
 ENV_SPACES = {
     "Blackjack-v1": {
@@ -74,7 +90,7 @@ ENV_SPACES = {
         "actions": "2",
         "action_space": {"type": "discrete", "n": 2},
     },
-    "Taxi-v3": {
+    "Taxi-v4": {
         "states": "500",
         "actions": "6",
         "action_space": {"type": "discrete", "n": 6},
@@ -148,14 +164,21 @@ def _as_bool(value, default: bool = False) -> bool:
     return default
 
 
+def _migrate_environment_id(environment: str) -> str:
+    if environment == "CliffWalking-v0":
+        return "CliffWalking-v1"
+    if environment == "Taxi-v3":
+        return "Taxi-v4"
+    return environment
+
+
 def get_config():
     config = dict(DEFAULT_CONFIG)
     config.update(session.get("config", {}))
     # Migrate older session values.
     if config.get("agent") == "tabular":
         config["agent"] = DEFAULT_CONFIG["agent"]
-    if config.get("environment") == "CliffWalking-v0":
-        config["environment"] = "CliffWalking-v1"
+    config["environment"] = _migrate_environment_id(config["environment"])
     return config
 
 
@@ -256,6 +279,7 @@ def api_config():
     }
     if identity_changed:
         reset_experiment_runtime(session)
+        session.pop("saved_agent_filename", None)
     else:
         # Keep the cached agent (Q-table / network); only refresh hyperparameters.
         update_runtime_config(session, session["config"])
@@ -266,6 +290,7 @@ def api_config():
 def api_config_reset():
     session["config"] = dict(DEFAULT_CONFIG)
     reset_experiment_runtime(session)
+    session.pop("saved_agent_filename", None)
     return jsonify(config_for_template(session["config"]))
 
 
@@ -351,40 +376,190 @@ def api_environment_run_action():
     return jsonify(payload)
 
 
-@app.route("/api/agent/q-table")
-def api_agent_q_table():
-    config = get_config()
-    if config["agent"] not in {"MC", "SARSA", "Q_learning"}:
-        return jsonify(
-            {
-                "error": (
-                    "Q-table analysis currently supports tabular agents "
-                    "(MC, SARSA, Q-learning)."
-                )
-            }
-        ), 400
-    try:
-        runtime = get_or_create_runtime(session, config, need_agent=True)
-        payload = get_q_table(runtime)
-    except Exception as exc:  # noqa: BLE001 - surface agent errors to the UI
-        return jsonify({"error": str(exc)}), 500
+def _tabular_analysis_error():
+    return jsonify(
+        {
+            "error": (
+                "Q-table analysis currently supports tabular agents "
+                "(MC, SARSA, Q-learning)."
+            )
+        }
+    ), 400
+
+
+def _attach_experiment_labels(payload: dict, config: dict) -> dict:
     payload["environment"] = config["environment"]
     payload["environment_label"] = ENV_LABELS.get(
         config["environment"], config["environment"]
     )
     payload["agent"] = config["agent"]
     payload["agent_label"] = AGENT_LABELS.get(config["agent"], config["agent"])
+    payload["action_labels"] = ACTION_LABELS.get(config["environment"], [])
+    return payload
+
+
+@app.route("/api/agent/q-table")
+def api_agent_q_table():
+    config = get_config()
+    if config["agent"] not in {"MC", "SARSA", "Q_learning"}:
+        return _tabular_analysis_error()
+    try:
+        runtime = get_or_create_runtime(session, config, need_agent=True)
+        payload = get_q_table(runtime)
+    except Exception as exc:  # noqa: BLE001 - surface agent errors to the UI
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(_attach_experiment_labels(payload, config))
+
+
+@app.route("/api/agent/analysis")
+def api_agent_analysis():
+    config = get_config()
+    if config["agent"] not in {"MC", "SARSA", "Q_learning"}:
+        return _tabular_analysis_error()
+    try:
+        runtime = get_or_create_runtime(session, config, need_agent=True)
+        payload = get_analysis(runtime)
+    except Exception as exc:  # noqa: BLE001 - surface agent errors to the UI
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(_attach_experiment_labels(payload, config))
+
+
+@app.route("/api/agent/evaluate", methods=["POST"])
+def api_agent_evaluate():
+    config = get_config()
+    if config["agent"] not in {"MC", "SARSA", "Q_learning"}:
+        return _tabular_analysis_error()
+
+    data = request.get_json(silent=True) or {}
+    try:
+        n_episodes = int(data.get("n_episodes", EVALUATION_EPISODES))
+        max_timesteps = int(
+            data.get("max_timesteps", config.get("max_timesteps", DEFAULT_MAX_TIMESTEPS))
+        )
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid evaluation parameters."}), 400
+    if n_episodes < 1:
+        return jsonify({"error": "Evaluation requires at least one episode."}), 400
+    if n_episodes > 100:
+        return jsonify({"error": "Evaluation supports at most 100 episodes."}), 400
+    if max_timesteps < 1:
+        return jsonify({"error": "Timesteps must be at least 1."}), 400
+    if max_timesteps > 10_000:
+        return jsonify({"error": "Timesteps must be at most 10000."}), 400
+
+    try:
+        runtime = get_or_create_runtime(session, config, need_agent=True)
+        payload = evaluate_greedy_episodes(
+            runtime, n_episodes=n_episodes, max_timesteps=max_timesteps
+        )
+    except Exception as exc:  # noqa: BLE001 - surface Gymnasium / agent errors to the UI
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(_attach_experiment_labels(payload, config))
+
+
+def _remember_saved_agent_filename(filename: str) -> None:
+    session["saved_agent_filename"] = filename
+
+
+def _filename_matches_config(filename: str, config: dict) -> bool:
+    described = describe_saved_agent(b"", filename)
+    return (
+        described.get("environment") == config.get("environment")
+        and described.get("agent") == config.get("agent")
+    )
+
+
+def _current_export_filename(config: dict) -> str:
+    stored = session.get("saved_agent_filename")
+    if isinstance(stored, str) and stored and _filename_matches_config(stored, config):
+        return stored
+    return default_agent_filename(config)
+
+
+def _agent_export_kind(config: dict) -> str:
+    return "Stable-Baselines3 model" if config.get("agent") == "drl-sb3" else "Q-table"
+
+
+def _can_export_agent(config: dict) -> tuple[bool, str | None]:
+    if config.get("agent") == "drl-sb3":
+        runtime = get_cached_runtime(session)
+        if runtime is None or runtime.get("sb3_model") is None:
+            return False, "No Stable-Baselines3 model in cache to save."
+        return True, None
+    return True, None
+
+
+def _agent_export_preview():
+    config = get_config()
+    available, reason = _can_export_agent(config)
+    default_name = default_agent_filename(config)
+    current_name = _current_export_filename(config)
+    try:
+        current_path = safe_saved_agent_path(current_name)
+        exists = current_path.is_file()
+    except ValueError:
+        exists = False
+    suggested = unique_saved_agent_filename(default_name)
+    if suggested == current_name:
+        stem = Path(default_name).stem
+        suffix = Path(default_name).suffix
+        kind = ""
+        base = stem
+        for marker in ("_q_table", "_model"):
+            if stem.endswith(marker):
+                base = stem[: -len(marker)]
+                kind = marker
+                break
+        suggested = unique_saved_agent_filename(f"{base}_2{kind}{suffix}")
+    directory = saved_agents_dir(create=True)
+    relative_dir = (
+        str(directory.relative_to(REPO_ROOT))
+        if directory.is_relative_to(REPO_ROOT)
+        else str(directory)
+    )
+    payload = {
+        "available": available,
+        "kind": _agent_export_kind(config),
+        "default_filename": default_name,
+        "current_filename": current_name,
+        "suggested_filename": suggested,
+        "exists": exists,
+        "directory": relative_dir,
+        "environment": config.get("environment"),
+        "agent": config.get("agent"),
+    }
+    if reason:
+        payload["reason"] = reason
     return jsonify(payload)
 
 
-@app.route("/api/agent/export", methods=["POST"])
+@app.route("/api/agent/export", methods=["GET", "POST"])
 def api_agent_export():
-    """Save the cached agent into the configured saved_agents directory."""
+    """Describe or save the cached agent into the configured saved_agents directory."""
+    if request.method == "GET":
+        return _agent_export_preview()
+
     config = get_config()
     data = request.get_json(silent=True) or {}
-    filename = data.get("filename")
+    mode = data.get("mode") or "overwrite"
+    if mode not in {"overwrite", "new"}:
+        return jsonify({"error": "Save mode must be overwrite or new."}), 400
+
+    available, reason = _can_export_agent(config)
+    if not available:
+        return jsonify({"error": reason or "No agent in cache to save."}), 404
 
     try:
+        default_name = default_agent_filename(config)
+        if mode == "new":
+            filename = normalize_export_filename(data.get("filename"), default_name)
+            target = safe_saved_agent_path(filename)
+            if target.is_file():
+                filename = unique_saved_agent_filename(filename)
+        else:
+            filename = normalize_export_filename(
+                data.get("filename"), _current_export_filename(config)
+            )
         if config["agent"] == "drl-sb3":
             runtime = get_cached_runtime(session)
             if runtime is None or runtime.get("sb3_model") is None:
@@ -397,6 +572,7 @@ def api_agent_export():
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
+    _remember_saved_agent_filename(path.name)
     relative = path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path
     return jsonify(
         {
@@ -439,6 +615,8 @@ def _align_config_with_saved_agent(content: bytes, filename: str) -> dict:
     config = get_config()
     described = describe_saved_agent(content, filename)
     environment = described.get("environment")
+    if environment:
+        environment = _migrate_environment_id(environment)
     agent = described.get("agent")
 
     changed = False
@@ -496,6 +674,7 @@ def api_agent_import():
             runtime = get_or_create_runtime(session, config, need_agent=True)
 
         kind, path = load_agent_from_disk(runtime, path.name)
+        _remember_saved_agent_filename(path.name)
     except FileNotFoundError as exc:
         return jsonify({"error": str(exc)}), 404
     except ValueError as exc:

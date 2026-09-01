@@ -1,0 +1,54 @@
+<dialog class="setup-dialog" id="save-agent-dialog" aria-labelledby="save-agent-dialog-title">
+  <form method="dialog" class="setup-dialog__form" id="save-agent-form">
+    <header class="setup-dialog__header">
+      <h2 class="setup-dialog__title" id="save-agent-dialog-title">Save current agent</h2>
+      <p class="setup-dialog__subtitle" id="save-agent-dialog-subtitle">
+        Choose whether to overwrite the existing agent or use a new file in
+        <code>saved_agents</code>.
+      </p>
+    </header>
+    <fieldset class="setup-choice">
+      <legend class="label">Save destination</legend>
+      <label class="setup-choice__option">
+        <input type="radio" name="save-agent-mode" value="overwrite" checked>
+        <span>
+          <span class="setup-choice__title">Overwrite existing agent</span>
+          <span class="setup-choice__hint" id="save-agent-overwrite-hint">
+            Replace the current saved agent file.
+          </span>
+        </span>
+      </label>
+      <label class="setup-choice__option">
+        <input type="radio" name="save-agent-mode" value="new">
+        <span>
+          <span class="setup-choice__title">Use a new file</span>
+          <span class="setup-choice__hint">
+            Keep the existing file and save this agent under a new name.
+          </span>
+        </span>
+      </label>
+    </fieldset>
+    <div class="setup-field">
+      <label class="label" for="save-agent-filename">File name</label>
+      <input
+        type="text"
+        id="save-agent-filename"
+        class="input"
+        autocomplete="off"
+        spellcheck="false"
+        required
+      >
+      <p id="save-agent-filename-help" class="helper-text">
+        The file will be written inside <code>saved_agents</code>.
+      </p>
+    </div>
+    <div class="setup-dialog__actions">
+      <button type="submit" class="btn btn--primary" value="confirm" id="save-agent-confirm">
+        Save
+      </button>
+      <button type="submit" class="btn btn--secondary" value="cancel">
+        Cancel
+      </button>
+    </div>
+  </form>
+</dialog>

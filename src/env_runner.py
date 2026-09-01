@@ -170,6 +170,54 @@ def update_runtime_config(session, config: dict) -> None:
     apply_agent_hyperparameters(runtime, config)
 
 
+def default_agent_filename(config: dict[str, Any] | None) -> str:
+    """Canonical on-disk name for an environment/agent pair."""
+    config = config or {}
+    env_id = str(config.get("environment", "environment")).replace("/", "-")
+    agent_id = config.get("agent", "agent")
+    if agent_id == "drl-sb3":
+        return f"{env_id}_{agent_id}_model.zip"
+    return f"{env_id}_{agent_id}_q_table.json"
+
+
+def normalize_export_filename(filename: str | None, default_name: str) -> str:
+    """Keep a basename and add the default extension when the user omitted one."""
+    if not filename or not str(filename).strip():
+        return default_name
+    name = Path(str(filename).strip()).name
+    if not name or name in {".", ".."}:
+        return default_name
+    if not Path(name).suffix:
+        name = f"{name}{Path(default_name).suffix}"
+    return name
+
+
+def unique_saved_agent_filename(preferred: str) -> str:
+    """Return `preferred` or the next free `<base>_<n><kind><ext>` variant."""
+    from project_paths import safe_saved_agent_path
+
+    path = safe_saved_agent_path(preferred)
+    if not path.exists():
+        return path.name
+
+    stem = path.stem
+    suffix = path.suffix
+    kind = ""
+    base = stem
+    for marker in ("_q_table", "_model"):
+        if stem.endswith(marker):
+            base = stem[: -len(marker)]
+            kind = marker
+            break
+
+    index = 2
+    while True:
+        candidate = f"{base}_{index}{kind}{suffix}"
+        if not safe_saved_agent_path(candidate).exists():
+            return candidate
+        index += 1
+
+
 def export_agent(runtime: dict[str, Any]) -> tuple[bytes, str, str]:
     """
     Serialize the cached agent.
@@ -181,6 +229,7 @@ def export_agent(runtime: dict[str, Any]) -> tuple[bytes, str, str]:
     agent_id = config.get("agent", "agent")
     env_id = str(config.get("environment", "environment")).replace("/", "-")
     agent = runtime.get("agent")
+    default_name = default_agent_filename(config)
 
     if agent_id == "drl-sb3":
         model = runtime.get("sb3_model")
@@ -194,7 +243,7 @@ def export_agent(runtime: dict[str, Any]) -> tuple[bytes, str, str]:
             if not zip_path.is_file():
                 zip_path = Path(save_path)
             content = zip_path.read_bytes()
-        return content, f"{env_id}_{agent_id}_model.zip", "application/zip"
+        return content, default_name, "application/zip"
 
     if agent is None or not hasattr(agent, "Q"):
         raise ValueError("No agent in cache to save.")
@@ -210,12 +259,11 @@ def export_agent(runtime: dict[str, Any]) -> tuple[bytes, str, str]:
         payload["policy"] = np.asarray(agent.policy, dtype=float).tolist()
 
     content = json.dumps(payload, indent=4).encode("utf-8")
-    filename = f"{env_id}_{agent_id}_q_table.json"
-    return content, filename, "application/json"
+    return content, default_name, "application/json"
 
 
 def _identity_from_filename(filename: str) -> dict[str, str]:
-    """Recover environment/agent from the `<env>_<agent>_<kind>` naming scheme."""
+    """Recover environment/agent from the `<env>_<agent>[_n]_<kind>` naming scheme."""
     stem = Path(filename).stem
     for suffix in ("_q_table", "_model"):
         if stem.endswith(suffix):
@@ -224,8 +272,12 @@ def _identity_from_filename(filename: str) -> dict[str, str]:
     known_agents = [*TABULAR_AGENTS, "drl-sb3"]
     for agent_id in sorted(known_agents, key=len, reverse=True):
         marker = f"_{agent_id}"
-        if stem.endswith(marker) and len(stem) > len(marker):
-            return {"environment": stem[: -len(marker)], "agent": agent_id}
+        index = stem.find(marker)
+        if index <= 0:
+            continue
+        remainder = stem[index + len(marker) :]
+        if remainder == "" or remainder.startswith("_"):
+            return {"environment": stem[:index], "agent": agent_id}
     return {}
 
 
@@ -773,8 +825,16 @@ def run_until_max_timesteps(
     }
 
 
+EVALUATION_EPISODES = 10
+
+
 def get_q_table(runtime: dict[str, Any]) -> dict:
     """Serialize the tabular agent's Q-table for analysis views (read-only)."""
+    return get_analysis(runtime)
+
+
+def get_analysis(runtime: dict[str, Any]) -> dict:
+    """Serialize Q, policy, and V(s) = max_a Q(s, a) for analysis views."""
     agent = runtime.get("agent")
     if agent is None:
         raise ValueError(
@@ -787,10 +847,93 @@ def get_q_table(runtime: dict[str, Any]) -> dict:
     if q_values.ndim != 2:
         raise ValueError("Unexpected Q-table shape.")
 
-    return {
+    payload = {
         "n_states": int(q_values.shape[0]),
         "n_actions": int(q_values.shape[1]),
         "q_table": q_values.tolist(),
+        "value": np.max(q_values, axis=1).tolist(),
+        "value_definition": "V(s) = max_a Q(s, a)",
+    }
+    if hasattr(agent, "policy"):
+        policy = np.asarray(agent.policy, dtype=float)
+        if policy.shape == q_values.shape:
+            payload["policy"] = policy.tolist()
+    return payload
+
+
+def evaluate_greedy_episodes(
+    runtime: dict[str, Any],
+    n_episodes: int = EVALUATION_EPISODES,
+    max_timesteps: int | None = None,
+) -> dict:
+    """
+    Run greedy evaluation episodes without learning or changing session config.
+
+    Temporarily sets epsilon to 0 and rebuilds the policy, then restores
+    Q, policy, epsilon, and alpha.
+    """
+    env = runtime.get("env")
+    agent = runtime.get("agent")
+    if env is None or agent is None:
+        raise ValueError("Evaluation currently requires a tabular agent.")
+    if n_episodes < 1:
+        raise ValueError("Evaluation requires at least one episode.")
+
+    horizon = _max_timesteps(runtime) if max_timesteps is None else max(1, int(max_timesteps))
+    snapshot = _copy_learned_state(agent)
+    previous_epsilon = float(getattr(agent, "epsilon", 0.0))
+    previous_alpha = float(agent.alpha) if hasattr(agent, "alpha") else None
+    previous_param_epsilon = (agent.parameters or {}).get("epsilon")
+    previous_param_alpha = (agent.parameters or {}).get("alpha") if hasattr(agent, "parameters") else None
+
+    try:
+        agent.epsilon = 0.0
+        if hasattr(agent, "parameters"):
+            agent.parameters["epsilon"] = 0.0
+        if hasattr(agent, "update_policy"):
+            n_states = int(getattr(agent, "nS", 0))
+            for state in range(n_states):
+                agent.update_policy(state)
+
+        rewards: list[float] = []
+        for _ in range(n_episodes):
+            observation, _info = env.reset()
+            agent.restart()
+            state = encode_observation(observation, env.observation_space)
+            agent.states.append(state)
+
+            episode_reward = 0.0
+            for _step in range(horizon):
+                action = agent.make_decision()
+                observation, reward, terminated, truncated, _info = env.step(action)
+                done = bool(terminated or truncated)
+                next_state = encode_observation(observation, env.observation_space)
+                episode_reward += float(reward)
+                if done:
+                    break
+                agent.states.append(next_state)
+            rewards.append(episode_reward)
+    finally:
+        _restore_learned_state(agent, snapshot)
+        agent.epsilon = previous_epsilon
+        if hasattr(agent, "parameters"):
+            if previous_param_epsilon is not None:
+                agent.parameters["epsilon"] = previous_param_epsilon
+            else:
+                agent.parameters["epsilon"] = previous_epsilon
+            if previous_param_alpha is not None:
+                agent.parameters["alpha"] = previous_param_alpha
+        if previous_alpha is not None:
+            agent.alpha = previous_alpha
+
+    rewards_array = np.asarray(rewards, dtype=float)
+    return {
+        "rewards": [float(value) for value in rewards_array],
+        "mean": float(np.mean(rewards_array)) if rewards_array.size else 0.0,
+        "std": float(np.std(rewards_array)) if rewards_array.size else 0.0,
+        "n_episodes": int(len(rewards)),
+        "exploration": 0.0,
+        "max_timesteps": horizon,
     }
 
 
