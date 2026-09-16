@@ -17,6 +17,7 @@ from env_runner import (
     DEFAULT_MAX_TIMESTEPS,
     DEFAULT_TRAINING_EPISODES,
     EVALUATION_EPISODES,
+    ZOO_ORGANIZATION,
     apply_agent_hyperparameters,
     default_agent_filename,
     describe_saved_agent,
@@ -27,6 +28,7 @@ from env_runner import (
     get_q_table,
     list_saved_agents,
     load_agent_from_disk,
+    load_sb3_from_zoo,
     normalize_export_filename,
     reset_environment,
     reset_experiment_runtime,
@@ -36,6 +38,11 @@ from env_runner import (
     save_agent_to_disk,
     unique_saved_agent_filename,
     update_runtime_config,
+    zoo_hub_refs,
+    SB3_AGENTS,
+    AGENT_SPACE_SUPPORT,
+    is_sb3_agent,
+    pair_is_compatible,
 )
 from project_paths import REPO_ROOT, resolve_path, saved_agents_dir, safe_saved_agent_path
 
@@ -70,7 +77,7 @@ AGENT_LABELS = {
     "MC": "MC",
     "SARSA": "SARSA",
     "Q_learning": "Q-learning",
-    "drl-sb3": "DRL agents from stable baselines 3",
+    **SB3_AGENTS,
 }
 
 ACTION_LABELS = {
@@ -88,21 +95,25 @@ ENV_SPACES = {
     "Blackjack-v1": {
         "states": "704 (32 × 11 × 2)",
         "actions": "2",
+        "observation_space": {"type": "tuple"},
         "action_space": {"type": "discrete", "n": 2},
     },
     "Taxi-v4": {
         "states": "500",
         "actions": "6",
+        "observation_space": {"type": "discrete", "n": 500},
         "action_space": {"type": "discrete", "n": 6},
     },
     "FrozenLake-v1": {
         "states": "16",
         "actions": "4",
+        "observation_space": {"type": "discrete", "n": 16},
         "action_space": {"type": "discrete", "n": 4},
     },
     "CliffWalking-v1": {
         "states": "48",
         "actions": "4",
+        "observation_space": {"type": "discrete", "n": 48},
         "action_space": {"type": "discrete", "n": 4},
     },
     "Acrobot-v1": {
@@ -112,6 +123,7 @@ ENV_SPACES = {
             "high=[1, 1, 1, 1, 12.57, 28.27]"
         ),
         "actions": "3",
+        "observation_space": {"type": "box"},
         "action_space": {"type": "discrete", "n": 3},
     },
     "CartPole-v1": {
@@ -121,21 +133,25 @@ ENV_SPACES = {
             "high=[4.8, ∞, 0.4189, ∞]"
         ),
         "actions": "2",
+        "observation_space": {"type": "box"},
         "action_space": {"type": "discrete", "n": 2},
     },
     "MountainCar-v0": {
         "states": "Box(2,), low=[-1.2, -0.07], high=[0.6, 0.07]",
         "actions": "3",
+        "observation_space": {"type": "box"},
         "action_space": {"type": "discrete", "n": 3},
     },
     "MountainCarContinuous-v0": {
         "states": "Box(2,), low=[-1.2, -0.07], high=[0.6, 0.07]",
         "actions": "Box(1,), low=-1.0, high=1.0",
+        "observation_space": {"type": "box"},
         "action_space": {"type": "box", "low": -1.0, "high": 1.0, "shape": (1,)},
     },
     "Pendulum-v1": {
         "states": "Box(3,), low=[-1, -1, -8], high=[1, 1, 8]",
         "actions": "Box(1,), low=-2.0, high=2.0",
+        "observation_space": {"type": "box"},
         "action_space": {"type": "box", "low": -2.0, "high": 2.0, "shape": (1,)},
     },
 }
@@ -172,12 +188,19 @@ def _migrate_environment_id(environment: str) -> str:
     return environment
 
 
+def _migrate_agent_id(agent: str) -> str:
+    if agent == "tabular":
+        return DEFAULT_CONFIG["agent"]
+    if agent == "drl-sb3":
+        return "PPO"
+    return agent
+
+
 def get_config():
     config = dict(DEFAULT_CONFIG)
     config.update(session.get("config", {}))
     # Migrate older session values.
-    if config.get("agent") == "tabular":
-        config["agent"] = DEFAULT_CONFIG["agent"]
+    config["agent"] = _migrate_agent_id(config["agent"])
     config["environment"] = _migrate_environment_id(config["environment"])
     return config
 
@@ -197,6 +220,7 @@ def config_for_template(config):
             config.get("max_timesteps", DEFAULT_MAX_TIMESTEPS)
         ),
         "allow_learning": _as_bool(config.get("allow_learning")),
+        "agent_family": "sb3" if is_sb3_agent(agent_id) else "tabular",
     }
 
 
@@ -213,24 +237,38 @@ def load():
     return render_template(
         "load.html",
         env_spaces=ENV_SPACES,
+        agent_space_support=AGENT_SPACE_SUPPORT,
+        sb3_agents=list(SB3_AGENTS),
+        zoo_organization=ZOO_ORGANIZATION,
         config=config_for_template(get_config()),
         default_config=DEFAULT_CONFIG,
     )
 
 
-@app.route("/api/config", methods=["GET", "POST"])
-def api_config():
-    if request.method == "GET":
-        return jsonify(config_for_template(get_config()))
+def _compatibility_error(agent: str, environment: str) -> str:
+    return (
+        f"{AGENT_LABELS.get(agent, agent)} is not compatible with "
+        f"{ENV_LABELS.get(environment, environment)}. "
+        "Tabular agents need discrete states and actions. "
+        "DQN supports Discrete actions only; DDPG, SAC, and TD3 "
+        "support Box (continuous) actions only; PPO and A2C support both."
+    )
 
-    data = request.get_json(silent=True) or {}
+
+def _store_config_from_payload(data: dict):
+    """Validate form/API payload and write it to the session.
+
+    Returns (config, None) on success, or (None, (response, status)) on error.
+    """
     environment = data.get("environment", DEFAULT_CONFIG["environment"])
     agent = data.get("agent", DEFAULT_CONFIG["agent"])
 
     if environment not in ENV_SPACES:
-        return jsonify({"error": "Unknown environment"}), 400
+        return None, (jsonify({"error": "Unknown environment"}), 400)
     if agent not in AGENT_LABELS:
-        return jsonify({"error": "Unknown agent"}), 400
+        return None, (jsonify({"error": "Unknown agent"}), 400)
+    if not pair_is_compatible(ENV_SPACES.get(environment), agent):
+        return None, (jsonify({"error": _compatibility_error(agent, environment)}), 400)
 
     current = get_config()
     try:
@@ -255,12 +293,12 @@ def api_config():
             default=_as_bool(current.get("allow_learning")),
         )
     except (TypeError, ValueError):
-        return jsonify({"error": "Invalid hyperparameter values"}), 400
+        return None, (jsonify({"error": "Invalid hyperparameter values"}), 400)
 
     if max_timesteps < 1:
-        return jsonify({"error": "Timesteps must be at least 1."}), 400
+        return None, (jsonify({"error": "Timesteps must be at least 1."}), 400)
     if max_timesteps > 10_000:
-        return jsonify({"error": "Timesteps must be at most 10000."}), 400
+        return None, (jsonify({"error": "Timesteps must be at most 10000."}), 400)
 
     identity_changed = (
         current.get("environment") != environment or current.get("agent") != agent
@@ -283,7 +321,24 @@ def api_config():
     else:
         # Keep the cached agent (Q-table / network); only refresh hyperparameters.
         update_runtime_config(session, session["config"])
-    return jsonify(config_for_template(session["config"]))
+    return session["config"], None
+
+
+@app.route("/api/config", methods=["GET", "POST"])
+def api_config():
+    if request.method == "GET":
+        return jsonify(config_for_template(get_config()))
+
+    data = request.get_json(silent=True) or {}
+    config, error = _store_config_from_payload(data)
+    if error:
+        response, status = error
+        return response, status
+    try:
+        get_or_create_runtime(session, config, need_agent=True)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(config_for_template(config))
 
 
 @app.route("/api/config/reset", methods=["POST"])
@@ -301,7 +356,7 @@ def api_environment_initial():
     if env_id not in ENV_SPACES:
         return jsonify({"error": "Unknown environment"}), 400
     try:
-        runtime = get_or_create_runtime(session, config)
+        runtime = get_or_create_runtime(session, config, need_agent=True)
         payload = reset_environment(runtime, seed=0)
     except Exception as exc:  # noqa: BLE001 - surface Gymnasium / agent errors to the UI
         return jsonify({"error": str(exc)}), 500
@@ -313,15 +368,6 @@ def api_environment_initial():
 @app.route("/api/environment/run-episode", methods=["POST"])
 def api_environment_run_episode():
     config = get_config()
-    if config["agent"] not in {"MC", "SARSA", "Q_learning"}:
-        return jsonify(
-            {
-                "error": (
-                    "Run episode currently supports tabular agents from "
-                    "TableAgents.py (MC, SARSA, Q-learning)."
-                )
-            }
-        ), 400
     data = request.get_json(silent=True) or {}
     action_choice = data.get("action", "policy")
     if action_choice == "manual":
@@ -347,16 +393,6 @@ def api_environment_run_episode():
 @app.route("/api/environment/run-action", methods=["POST"])
 def api_environment_run_action():
     config = get_config()
-    if config["agent"] not in {"MC", "SARSA", "Q_learning"}:
-        return jsonify(
-            {
-                "error": (
-                    "Run an action currently supports tabular agents from "
-                    "TableAgents.py (MC, SARSA, Q-learning)."
-                )
-            }
-        ), 400
-
     data = request.get_json(silent=True) or {}
     action_choice = data.get("action", "policy")
     if action_choice == "manual":
@@ -477,11 +513,11 @@ def _current_export_filename(config: dict) -> str:
 
 
 def _agent_export_kind(config: dict) -> str:
-    return "Stable-Baselines3 model" if config.get("agent") == "drl-sb3" else "Q-table"
+    return "Stable-Baselines3 model" if is_sb3_agent(config.get("agent")) else "Q-table"
 
 
 def _can_export_agent(config: dict) -> tuple[bool, str | None]:
-    if config.get("agent") == "drl-sb3":
+    if is_sb3_agent(config.get("agent")):
         runtime = get_cached_runtime(session)
         if runtime is None or runtime.get("sb3_model") is None:
             return False, "No Stable-Baselines3 model in cache to save."
@@ -560,7 +596,7 @@ def api_agent_export():
             filename = normalize_export_filename(
                 data.get("filename"), _current_export_filename(config)
             )
-        if config["agent"] == "drl-sb3":
+        if is_sb3_agent(config["agent"]):
             runtime = get_cached_runtime(session)
             if runtime is None or runtime.get("sb3_model") is None:
                 return jsonify({"error": "No Stable-Baselines3 model in cache to save."}), 404
@@ -618,6 +654,8 @@ def _align_config_with_saved_agent(content: bytes, filename: str) -> dict:
     if environment:
         environment = _migrate_environment_id(environment)
     agent = described.get("agent")
+    if agent:
+        agent = _migrate_agent_id(agent)
 
     changed = False
     if environment and environment != config["environment"]:
@@ -664,7 +702,7 @@ def api_agent_import():
 
         config = _align_config_with_saved_agent(content, path.name)
 
-        if config["agent"] == "drl-sb3":
+        if is_sb3_agent(config["agent"]):
             runtime = get_cached_runtime(session)
             if runtime is None or runtime.get("sb3_model") is None:
                 return jsonify(
@@ -693,6 +731,66 @@ def api_agent_import():
             "kind": kind,
             "filename": path.name,
             "path": relative,
+            **config_for_template(config),
+        }
+    )
+
+
+@app.route("/api/agent/zoo", methods=["POST"])
+def api_agent_zoo():
+    """Download a pretrained RL Baselines3 Zoo agent for the selected env/algo."""
+    data = request.get_json(silent=True) or {}
+    organization = str(data.get("organization") or ZOO_ORGANIZATION).strip() or ZOO_ORGANIZATION
+    if not organization.replace("-", "").replace("_", "").isalnum():
+        return jsonify({"error": "Invalid Hugging Face organization."}), 400
+
+    environment = data.get("environment", DEFAULT_CONFIG["environment"])
+    agent = data.get("agent", DEFAULT_CONFIG["agent"])
+    if environment not in ENV_SPACES:
+        return jsonify({"error": "Unknown environment"}), 400
+    if not is_sb3_agent(agent):
+        return jsonify(
+            {
+                "error": (
+                    "Zoo agents are available for Stable-Baselines3 algorithms only. "
+                    "Select A2C, DDPG, DQN, PPO, SAC, or TD3."
+                )
+            }
+        ), 400
+    if not pair_is_compatible(ENV_SPACES.get(environment), agent):
+        return jsonify({"error": _compatibility_error(agent, environment)}), 400
+
+    refs = zoo_hub_refs(agent, environment, organization)
+    try:
+        model, checkpoint = load_sb3_from_zoo(
+            agent,
+            environment,
+            organization=organization,
+        )
+    except FileNotFoundError as exc:
+        return jsonify({"error": str(exc), **refs}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc), **refs}), 400
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc), **refs}), 500
+
+    config, error = _store_config_from_payload(data)
+    if error:
+        response, status = error
+        return response, status
+    try:
+        get_or_create_runtime(session, config, need_agent=True, sb3_model=model)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc), **refs}), 500
+
+    return jsonify(
+        {
+            "status": "loaded",
+            "kind": "Stable-Baselines3 Zoo model",
+            "repo_id": checkpoint["repo_id"],
+            "filename": checkpoint["filename"],
+            "organization": checkpoint["organization"],
+            "zoo_env": checkpoint.get("zoo_env", config["environment"]),
             **config_for_template(config),
         }
     )

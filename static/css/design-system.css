@@ -364,6 +364,10 @@ img {
   color: var(--color-text);
 }
 
+.select option:disabled {
+  color: var(--color-text-muted);
+}
+
 .helper-text {
   margin-top: var(--space-1);
   font-size: var(--font-size-sm);

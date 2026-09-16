@@ -22,7 +22,7 @@ Abre `http://127.0.0.1:5000`.
 Pruebas:
 
 ```bash
-.\.venv\Scripts\python.exe -m unittest tests.test_visualization_no_learning
+.\.venv\Scripts\python.exe -m unittest tests.test_visualization_no_learning tests.test_zoo_agent
 ```
 
 ## Arquitectura
@@ -100,7 +100,7 @@ En `app.py` → `DEFAULT_CONFIG`:
 
 Entornos soportados en el selector: Toy Text (`Blackjack-v1`, `Taxi-v4`, `FrozenLake-v1`, `CliffWalking-v1`) y Classic Control (`Acrobot-v1`, `CartPole-v1`, `MountainCar-v0`, `MountainCarContinuous-v0`, `Pendulum-v1`). Los tabulares **exigen action space Discrete**; continuous (MountainCarContinuous, Pendulum) fallan al crear el agente.
 
-Agente `drl-sb3` aparece en el selector y hay stubs de save/load SB3, pero Visualization / Analysis / Training **solo soportan** `MC`, `SARSA`, `Q_learning`.
+El selector de Environment lista agentes tabulares y los de Stable-Baselines3 (`A2C`, `DDPG`, `DQN`, `PPO`, `SAC`, `TD3`). **Apply configuration** instancia el modelo SB3 (`create_sb3_model`) además de guardar la sesión. **Load Zoo agent** descarga el zip pretrained del Hub (`sb3/{algo}-{env}`) y lo pone en `runtime["sb3_model"]`. Visualization corre episodios/acciones con `model.predict`. Las combinaciones incompatibles se deshabilitan: tabulares solo con observación y acción discretas (Blackjack es Tuple, solo tabular); DQN solo acción Discrete; DDPG/SAC/TD3 solo acción Box; PPO y A2C ambas. Analysis **solo soporta** `MC`, `SARSA`, `Q_learning`. Una sesión vieja con `drl-sb3` se migra a `PPO`.
 
 ## API (JSON)
 
@@ -120,6 +120,7 @@ Prefijo `/api/*` se sirve con `Cache-Control: no-store`.
 | POST | `/api/agent/export` | Guarda agente. Body: `{ "mode": "overwrite" \| "new", "filename": "..." }` |
 | GET | `/api/agent/saved` | Lista archivos en `saved_agents` |
 | POST | `/api/agent/import` | Carga `{ "filename" }` (o upload). Alinea config al metadata del archivo |
+| POST | `/api/agent/zoo` | Descarga un agente pretrained del RL Baselines3 Zoo (Hub `sb3/{algo}-{env}`) y lo carga en el runtime SB3 |
 | POST | `/api/training/start` | Prepara entrenamiento |
 | POST | `/api/training/episode` | Un episodio de training |
 
@@ -140,6 +141,8 @@ Nombres de archivo canónicos:
 
 `Load configuration` lista `saved_agents` y hace `POST /api/agent/import`.
 
+**Load Zoo agent** (solo algoritmos Stable-Baselines3 compatibles con el entorno) abre un diálogo con algorithm, environment, Hub repo (`sb3/{algo}-{env}`) y organization `sb3`, luego `POST /api/agent/zoo`. Eso aplica la config del formulario, descarga el zip del Hub (misma convención que `python -m rl_zoo3.load_from_hub --algo --env -orga sb3`) y sustituye el modelo SB3 en memoria. Si el Hub no tiene ese par, responde 404. Visualization puede “enjoy” el agente con `model.predict`. Apply configuration sigue creando un modelo **sin entrenar**.
+
 El botón **Save agent** del context bar (todas las pestañas del workspace) usa el mismo diálogo/`SaveAgent`. Si el preview dice `available: false`, muestra error. Cancelar no guarda. Apply configuration sigue usando el mismo flujo compartido.
 
 ## Convenciones al cambiar UI
@@ -151,13 +154,13 @@ El botón **Save agent** del context bar (todas las pestañas del workspace) usa
 
 ## Dependencias
 
-`requirements.txt`: Flask, gymnasium\[classic-control\], numpy, Pillow, termcolor.
+`requirements.txt`: Flask, gymnasium\[classic-control\], numpy, Pillow, stable-baselines3, huggingface_hub.
 
 `src/agents/deepQ.py` importa `torch`; **no está en requirements** porque esa ruta no está conectada a la app.
 
 ## Qué no está hecho / limitaciones
 
-- DRL SB3: opción de UI y persistencia parcial; no hay entrenamiento ni visualización completa.
+- DRL SB3: Apply instancia un modelo sin entrenar; **Load Zoo agent** baja un checkpoint pretrained del Hub. Visualization corre episodios/acciones con `model.predict`. No hay entrenamiento SB3 en la pestaña Training.
 - Analysis: Q-table, policy (`agent.policy`), V(s)=max_a Q(s,a), y metrics (10 episodios greedy). DRL sigue sin soporte.
 - Agentes en `src/agents/` distintos de TableAgents no se instancian desde Flask.
 - Runtime vive en memoria del proceso: reiniciar el servidor pierde la Q-table (salvo que se haya guardado en `saved_agents`).

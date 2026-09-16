@@ -46,7 +46,10 @@
             <option value="Pendulum-v1">Pendulum</option>
           </optgroup>
         </select>
-        <p class="helper-text">Toy Text and Classic Control environments are supported.</p>
+        <p class="helper-text">
+          Toy Text environments are discrete. Classic Control uses Box observations;
+          Pendulum and Continuous Mountain Car also have continuous actions.
+        </p>
       </div>
 
       <div class="setup-section">
@@ -83,12 +86,20 @@
             <option value="SARSA">SARSA</option>
             <option value="Q_learning">Q-learning</option>
           </optgroup>
-          <optgroup label="DRL agents from stable baselines 3">
-            <option value="drl-sb3">DRL agents from stable baselines 3</option>
+          <optgroup label="Stable-Baselines3">
+            <option value="A2C">A2C</option>
+            <option value="DDPG">DDPG</option>
+            <option value="DQN">DQN</option>
+            <option value="PPO">PPO</option>
+            <option value="SAC">SAC</option>
+            <option value="TD3">TD3</option>
           </optgroup>
         </select>
         <p class="helper-text">
-          Tabular agents use discrete state-action values. DRL options rely on Stable-Baselines3.
+          Incompatible options are disabled. Tabular agents need discrete states and
+          actions. Stable-Baselines3: DQN supports Discrete actions only; DDPG, SAC,
+          and TD3 support Box (continuous) actions only; PPO and A2C support both.
+          Tuple observations (Blackjack) are tabular-only.
         </p>
       </div>
 
@@ -145,6 +156,9 @@
       <button type="button" class="btn btn--secondary" id="load-configuration">
         Load configuration
       </button>
+      <button type="button" class="btn btn--secondary" id="load-zoo-agent">
+        Load Zoo agent
+      </button>
       <button type="button" class="btn btn--secondary" id="reset-defaults">
         Reset defaults
       </button>
@@ -180,11 +194,52 @@
       </div>
     </form>
   </dialog>
+
+  <dialog class="setup-dialog" id="load-zoo-dialog" aria-labelledby="load-zoo-dialog-title">
+    <form method="dialog" class="setup-dialog__form" id="load-zoo-form">
+      <header class="setup-dialog__header">
+        <h2 class="setup-dialog__title" id="load-zoo-dialog-title">Load Zoo agent</h2>
+        <p class="setup-dialog__subtitle">
+          Download a pretrained Stable-Baselines3 Zoo model from Hugging Face
+          for the selected algorithm and environment, then use it in Visualization.
+        </p>
+      </header>
+      <dl class="setup-metrics">
+        <div class="setup-metric">
+          <dt>Algorithm</dt>
+          <dd id="zoo-algo" class="setup-metric__value font-mono">—</dd>
+        </div>
+        <div class="setup-metric">
+          <dt>Environment</dt>
+          <dd id="zoo-env" class="setup-metric__value font-mono">—</dd>
+        </div>
+        <div class="setup-metric">
+          <dt>Hub repository</dt>
+          <dd id="zoo-repo" class="setup-metric__value font-mono">—</dd>
+        </div>
+        <div class="setup-metric">
+          <dt>Organization</dt>
+          <dd id="zoo-orga" class="setup-metric__value font-mono">{{ zoo_organization }}</dd>
+        </div>
+      </dl>
+      <div class="setup-dialog__actions">
+        <button type="submit" class="btn btn--primary" value="confirm" id="load-zoo-confirm">
+          Load
+        </button>
+        <button type="submit" class="btn btn--secondary" value="cancel">
+          Cancel
+        </button>
+      </div>
+    </form>
+  </dialog>
 {% endblock %}
 
 {% block scripts %}
   <script>
     const envSpaces = {{ env_spaces | tojson }};
+    const agentSpaceSupport = {{ agent_space_support | tojson }};
+    const sb3Agents = new Set({{ sb3_agents | tojson }});
+    const zooOrganization = {{ zoo_organization | tojson }};
     const savedConfig = {{ config | tojson }};
     const defaultConfig = {{ default_config | tojson }};
     const form = document.getElementById("setup-form");
@@ -197,6 +252,138 @@
     const saveStatus = document.getElementById("save-status");
     const learningRateError = document.getElementById("learning-rate-error");
     const explorationError = document.getElementById("exploration-error");
+    const loadZooButton = document.getElementById("load-zoo-agent");
+    const loadZooDialog = document.getElementById("load-zoo-dialog");
+    const loadZooForm = document.getElementById("load-zoo-form");
+    const zooAlgo = document.getElementById("zoo-algo");
+    const zooEnv = document.getElementById("zoo-env");
+    const zooRepo = document.getElementById("zoo-repo");
+    const zooOrga = document.getElementById("zoo-orga");
+
+    function isSb3Agent(agentId) {
+      return sb3Agents.has(agentId);
+    }
+
+    function zooHubRefs(agentId, envId) {
+      const algo = String(agentId || "").toLowerCase();
+      const modelName = `${algo}-${envId}`;
+      return {
+        algo,
+        modelName,
+        repoId: `${zooOrganization}/${modelName}`,
+        filename: `${modelName}.zip`,
+      };
+    }
+
+    function syncZooButton() {
+      const enabled =
+        isSb3Agent(agentSelect.value) &&
+        pairFits(agentSelect.value, environmentSelect.value);
+      loadZooButton.disabled = !enabled;
+      loadZooButton.title = enabled
+        ? "Download a pretrained RL Baselines3 Zoo agent for this algorithm and environment."
+        : "Select a Stable-Baselines3 algorithm that fits the environment to load a Zoo agent.";
+    }
+
+    function fillZooDialog() {
+      const refs = zooHubRefs(agentSelect.value, environmentSelect.value);
+      zooAlgo.textContent = agentSelect.value || "—";
+      zooEnv.textContent = environmentSelect.value || "—";
+      zooRepo.textContent = refs.repoId || "—";
+      zooOrga.textContent = zooOrganization;
+    }
+
+    function pairFits(agentId, envId) {
+      const spec = envSpaces[envId];
+      const support = agentSpaceSupport[agentId];
+      if (!spec || !support) {
+        return false;
+      }
+      const observation = spec.observation_space && spec.observation_space.type;
+      const action = spec.action_space && spec.action_space.type;
+      return (
+        support.observation.includes(observation) &&
+        support.action.includes(action)
+      );
+    }
+
+    function incompatibilityReason(agentId, envId) {
+      const spec = envSpaces[envId];
+      const support = agentSpaceSupport[agentId];
+      if (!spec || !support) {
+        return "Incompatible environment and agent.";
+      }
+      const observation = spec.observation_space && spec.observation_space.type;
+      const action = spec.action_space && spec.action_space.type;
+      if (!support.observation.includes(observation)) {
+        if (observation === "box") {
+          return "Tabular agents need discrete states; this environment has a Box observation space.";
+        }
+        if (observation === "tuple") {
+          return "Stable-Baselines3 does not support Tuple observation spaces.";
+        }
+        return "Incompatible observation space.";
+      }
+      if (!support.action.includes(action)) {
+        if (action === "box") {
+          return "This algorithm does not support continuous (Box) actions.";
+        }
+        return "This algorithm requires continuous (Box) actions.";
+      }
+      return "";
+    }
+
+    function firstEnabledValue(select, preferred) {
+      const options = Array.from(select.options);
+      if (preferred) {
+        const current = options.find(
+          (option) => option.value === preferred && !option.disabled
+        );
+        if (current) {
+          return current.value;
+        }
+      }
+      const next = options.find((option) => option.value && !option.disabled);
+      return next ? next.value : "";
+    }
+
+    function disableIncompatibleOptions(select, isEnabled) {
+      Array.from(select.options).forEach((option) => {
+        if (!option.value) {
+          return;
+        }
+        const enabled = isEnabled(option.value);
+        option.disabled = !enabled;
+        option.title = enabled ? "" : incompatibilityReason(
+          select === agentSelect ? option.value : agentSelect.value,
+          select === environmentSelect ? option.value : environmentSelect.value
+        );
+      });
+    }
+
+    function syncCompatibility(changed) {
+      if (changed === "environment") {
+        disableIncompatibleOptions(agentSelect, (agentId) =>
+          pairFits(agentId, environmentSelect.value)
+        );
+        agentSelect.value = firstEnabledValue(agentSelect, agentSelect.value);
+        disableIncompatibleOptions(environmentSelect, (envId) =>
+          pairFits(agentSelect.value, envId)
+        );
+      } else {
+        disableIncompatibleOptions(environmentSelect, (envId) =>
+          pairFits(agentSelect.value, envId)
+        );
+        environmentSelect.value = firstEnabledValue(
+          environmentSelect,
+          environmentSelect.value
+        );
+        disableIncompatibleOptions(agentSelect, (agentId) =>
+          pairFits(agentId, environmentSelect.value)
+        );
+      }
+      syncZooButton();
+    }
 
     function updateHyperparameters() {
       const spec = envSpaces[environmentSelect.value];
@@ -214,6 +401,11 @@
       agentSelect.value = config.agent;
       learningRateInput.value = config.learning_rate;
       explorationInput.value = config.exploration_probability;
+      syncCompatibility("environment");
+      if (config.agent && pairFits(config.agent, environmentSelect.value)) {
+        agentSelect.value = config.agent;
+        syncCompatibility("environment");
+      }
       clearFieldErrors();
       updateHyperparameters();
     }
@@ -290,6 +482,14 @@
 
       if (!validateForm()) {
         setStatus("Please fix the highlighted fields before applying.", "error");
+        if (window.ExperimentContext) {
+          ExperimentContext.setStatus("error", "Error");
+        }
+        return;
+      }
+
+      if (!pairFits(agentSelect.value, environmentSelect.value)) {
+        setStatus("That environment and agent combination is not compatible.", "error");
         if (window.ExperimentContext) {
           ExperimentContext.setStatus("error", "Error");
         }
@@ -389,17 +589,24 @@
 
     applyConfig(savedConfig);
     environmentSelect.addEventListener("change", () => {
+      syncCompatibility("environment");
       updateHyperparameters();
       if (window.ExperimentContext) {
-        const selected = environmentSelect.options[environmentSelect.selectedIndex];
-        ExperimentContext.setEnvironment(environmentSelect.value, selected ? selected.textContent : environmentSelect.value);
+        const selectedEnv = environmentSelect.options[environmentSelect.selectedIndex];
+        ExperimentContext.setEnvironment(environmentSelect.value, selectedEnv ? selectedEnv.textContent : environmentSelect.value);
+        const selectedAgent = agentSelect.options[agentSelect.selectedIndex];
+        ExperimentContext.setAgent(agentSelect.value, selectedAgent ? selectedAgent.textContent.trim() : agentSelect.value);
       }
       markConfiguring();
     });
     agentSelect.addEventListener("change", () => {
+      syncCompatibility("agent");
+      updateHyperparameters();
       if (window.ExperimentContext) {
-        const selected = agentSelect.options[agentSelect.selectedIndex];
-        ExperimentContext.setAgent(agentSelect.value, selected ? selected.textContent.trim() : agentSelect.value);
+        const selectedEnv = environmentSelect.options[environmentSelect.selectedIndex];
+        ExperimentContext.setEnvironment(environmentSelect.value, selectedEnv ? selectedEnv.textContent : environmentSelect.value);
+        const selectedAgent = agentSelect.options[agentSelect.selectedIndex];
+        ExperimentContext.setAgent(agentSelect.value, selectedAgent ? selectedAgent.textContent.trim() : agentSelect.value);
       }
       markConfiguring();
     });
@@ -523,6 +730,91 @@
       }
       loadConfigurationFromSaved(filename).catch((error) => {
         setStatus(error.message || "Could not load configuration.", "error");
+        if (window.ExperimentContext) {
+          ExperimentContext.setStatus("error", "Error");
+        }
+      });
+    });
+
+    async function loadZooAgent() {
+      if (!validateForm()) {
+        setStatus("Please fix the highlighted fields before loading a Zoo agent.", "error");
+        if (window.ExperimentContext) {
+          ExperimentContext.setStatus("error", "Error");
+        }
+        return;
+      }
+      if (!isSb3Agent(agentSelect.value) || !pairFits(agentSelect.value, environmentSelect.value)) {
+        setStatus(
+          "Select a Stable-Baselines3 algorithm that fits the environment to load a Zoo agent.",
+          "error"
+        );
+        if (window.ExperimentContext) {
+          ExperimentContext.setStatus("error", "Error");
+        }
+        return;
+      }
+
+      const refs = zooHubRefs(agentSelect.value, environmentSelect.value);
+      setStatus(`Downloading ${refs.repoId} from the RL Baselines3 Zoo…`, null);
+      if (window.ExperimentContext) {
+        ExperimentContext.setStatus("configuring", "Loading Zoo agent");
+      }
+      loadZooButton.disabled = true;
+
+      const response = await fetch("{{ url_for('api_agent_zoo') }}", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...currentConfig(),
+          organization: zooOrganization,
+        }),
+      });
+
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (error) {
+        data = {};
+      }
+
+      syncZooButton();
+      if (!response.ok) {
+        setStatus(data.error || "Could not load the Zoo agent.", "error");
+        if (window.ExperimentContext) {
+          ExperimentContext.setStatus("error", "Error");
+        }
+        return;
+      }
+
+      applyConfig(data);
+      if (window.ExperimentContext) {
+        ExperimentContext.setEnvironment(data.environment, data.environment_label);
+        ExperimentContext.setAgent(data.agent, data.agent_label);
+        ExperimentContext.setStatus("ready", "Ready");
+      }
+      const repo = data.repo_id || refs.repoId;
+      setStatus(
+        `Loaded Zoo agent from ${repo}. Ready to enjoy in Visualization.`,
+        "success"
+      );
+    }
+
+    loadZooButton.addEventListener("click", () => {
+      fillZooDialog();
+      loadZooDialog.showModal();
+    });
+
+    loadZooForm.addEventListener("submit", (event) => {
+      const submitter = event.submitter;
+      if (!submitter || submitter.value !== "confirm") {
+        return;
+      }
+      event.preventDefault();
+      loadZooDialog.close();
+      loadZooAgent().catch((error) => {
+        syncZooButton();
+        setStatus(error.message || "Could not load the Zoo agent.", "error");
         if (window.ExperimentContext) {
           ExperimentContext.setStatus("error", "Error");
         }

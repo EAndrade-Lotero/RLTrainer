@@ -898,6 +898,15 @@
     }
 
     populateActions(config.action_space);
+    if (config.agent_family === "sb3") {
+      chartModeSelect.value = "none";
+      qChartEmpty.textContent =
+        "Q values are for tabular agents. This view shows the Stable-Baselines3 policy acting in the environment.";
+      const learningToggle = allowLearning.closest(".viz-toggle");
+      if (learningToggle) {
+        learningToggle.hidden = true;
+      }
+    }
     runEpisodeButton.addEventListener("click", onEpisodeButtonClick);
     runActionButton.addEventListener("click", runAction);
     prevFrameButton.addEventListener("click", () => showFrameAt(frameIndex - 1));

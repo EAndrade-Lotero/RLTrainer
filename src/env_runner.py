@@ -38,6 +38,223 @@ TABULAR_AGENTS = {
     "Q_learning": Q_learning,
 }
 
+SB3_AGENTS = {
+    "A2C": "A2C",
+    "DDPG": "DDPG",
+    "DQN": "DQN",
+    "PPO": "PPO",
+    "SAC": "SAC",
+    "TD3": "TD3",
+}
+
+# Action-space support matches the Stable-Baselines3 algorithm table.
+# Observation: SB3 does not support Tuple spaces; tabular agents need Discrete
+# or a Discrete Tuple (Blackjack). Continuous (Box) observations rule out tabular methods.
+AGENT_SPACE_SUPPORT = {
+    "MC": {"observation": ["discrete", "tuple"], "action": ["discrete"]},
+    "SARSA": {"observation": ["discrete", "tuple"], "action": ["discrete"]},
+    "Q_learning": {"observation": ["discrete", "tuple"], "action": ["discrete"]},
+    "A2C": {"observation": ["discrete", "box"], "action": ["discrete", "box"]},
+    "PPO": {"observation": ["discrete", "box"], "action": ["discrete", "box"]},
+    "DQN": {"observation": ["discrete", "box"], "action": ["discrete"]},
+    "DDPG": {"observation": ["box"], "action": ["box"]},
+    "SAC": {"observation": ["box"], "action": ["box"]},
+    "TD3": {"observation": ["box"], "action": ["box"]},
+}
+
+
+def is_sb3_agent(agent_id: str | None) -> bool:
+    return agent_id in SB3_AGENTS or agent_id == "drl-sb3"
+
+
+ZOO_ORGANIZATION = "sb3"
+
+# Older Gymnasium/Gym ids still used by some RL Baselines3 Zoo Hub repos.
+ZOO_ENV_ALIASES = {
+    "Taxi-v4": ("Taxi-v4", "Taxi-v3"),
+    "FrozenLake-v1": ("FrozenLake-v1", "FrozenLake-v0"),
+    "CliffWalking-v1": ("CliffWalking-v1", "CliffWalking-v0"),
+    "Pendulum-v1": ("Pendulum-v1", "Pendulum-v0"),
+}
+
+
+def _close_sb3_model(model) -> None:
+    if model is None:
+        return
+    env = getattr(model, "env", None)
+    if env is None:
+        return
+    try:
+        env.close()
+    except Exception:
+        pass
+
+
+def _sb3_algo_class(agent_name: str):
+    if agent_name not in SB3_AGENTS:
+        raise ValueError(f"Unknown Stable-Baselines3 agent: {agent_name}")
+    try:
+        from stable_baselines3 import A2C, DDPG, DQN, PPO, SAC, TD3
+    except ImportError as exc:
+        raise ValueError(
+            "Stable-Baselines3 is not installed. Run: pip install stable-baselines3"
+        ) from exc
+    return {
+        "A2C": A2C,
+        "DDPG": DDPG,
+        "DQN": DQN,
+        "PPO": PPO,
+        "SAC": SAC,
+        "TD3": TD3,
+    }[agent_name]
+
+
+def create_sb3_model(agent_name: str, config: dict):
+    """
+    Instantiate a Stable-Baselines3 algorithm.
+
+    The model gets its own env from the Gymnasium id so it does not wrap the
+    rgb_array env used for visualization.
+    """
+    algo_cls = _sb3_algo_class(agent_name)
+    env_id = config.get("environment")
+    if not env_id:
+        raise ValueError("An environment is required to create a Stable-Baselines3 model.")
+    learning_rate = float(config.get("learning_rate", 3e-4))
+    try:
+        return algo_cls(
+            "MlpPolicy",
+            env_id,
+            learning_rate=learning_rate,
+            verbose=0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(
+            f"Could not create {agent_name} for {env_id}: {exc}"
+        ) from exc
+
+
+def zoo_hub_refs(
+    agent_name: str,
+    env_id: str,
+    organization: str = ZOO_ORGANIZATION,
+) -> dict[str, str]:
+    """Hub repo/file names matching rl_zoo3.load_from_hub (algo-env, orga sb3)."""
+    algo = str(agent_name).lower()
+    model_name = f"{algo}-{env_id}"
+    return {
+        "algo": algo,
+        "organization": organization,
+        "model_name": model_name,
+        "repo_id": f"{organization}/{model_name}",
+        "filename": f"{model_name}.zip",
+    }
+
+
+def zoo_env_candidates(env_id: str) -> tuple[str, ...]:
+    aliases = ZOO_ENV_ALIASES.get(env_id)
+    if aliases:
+        return aliases
+    return (env_id,)
+
+
+def _is_hub_missing(exc: BaseException) -> bool:
+    name = type(exc).__name__
+    if name in {"RepositoryNotFoundError", "EntryNotFoundError", "RevisionNotFoundError"}:
+        return True
+    text = str(exc).lower()
+    return "404" in text or "not found" in text or "does not exist" in text
+
+
+def download_zoo_checkpoint(
+    agent_name: str,
+    env_id: str,
+    organization: str = ZOO_ORGANIZATION,
+) -> dict[str, str]:
+    """
+    Download a pretrained Zoo zip from Hugging Face Hub.
+
+    Mirrors `python -m rl_zoo3.load_from_hub --algo --env -orga sb3`.
+    """
+    if agent_name not in SB3_AGENTS:
+        raise ValueError("Zoo agents are available for Stable-Baselines3 algorithms only.")
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as exc:
+        raise ValueError(
+            "huggingface_hub is not installed. Run: pip install huggingface_hub"
+        ) from exc
+
+    last_missing: BaseException | None = None
+    tried: list[str] = []
+    for zoo_env in zoo_env_candidates(env_id):
+        refs = zoo_hub_refs(agent_name, zoo_env, organization)
+        tried.append(f"{refs['repo_id']} ({refs['filename']})")
+        try:
+            path = hf_hub_download(
+                repo_id=refs["repo_id"],
+                filename=refs["filename"],
+            )
+            return {
+                **refs,
+                "path": path,
+                "zoo_env": zoo_env,
+            }
+        except Exception as exc:  # noqa: BLE001
+            if _is_hub_missing(exc):
+                last_missing = exc
+                continue
+            raise ValueError(
+                f"Could not download {refs['repo_id']} from Hugging Face Hub: {exc}"
+            ) from exc
+
+    detail = f" Last error: {last_missing}." if last_missing else ""
+    raise FileNotFoundError(
+        f"No RL Baselines3 Zoo agent found for {agent_name} on {env_id} "
+        f"(organization {organization}). Tried: {', '.join(tried)}.{detail}"
+    )
+
+
+def _load_sb3_checkpoint(agent_name: str, path: str):
+    algo_cls = _sb3_algo_class(agent_name)
+    try:
+        return algo_cls.load(path)
+    except Exception as first:  # noqa: BLE001
+        try:
+            return algo_cls.load(
+                path,
+                custom_objects={
+                    "learning_rate": 3e-4,
+                    "lr_schedule": lambda _: 3e-4,
+                    "clip_range": lambda _: 0.2,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            raise ValueError(
+                f"Could not load the Zoo checkpoint with {agent_name}: {first}"
+            ) from first
+
+
+def load_sb3_from_zoo(
+    agent_name: str,
+    env_id: str,
+    organization: str = ZOO_ORGANIZATION,
+) -> tuple[Any, dict[str, str]]:
+    """Download a Zoo Hub checkpoint and load it with the matching SB3 algorithm."""
+    checkpoint = download_zoo_checkpoint(agent_name, env_id, organization)
+    model = _load_sb3_checkpoint(agent_name, checkpoint["path"])
+    return model, checkpoint
+
+
+def pair_is_compatible(environment_spec: dict[str, Any] | None, agent_id: str | None) -> bool:
+    """Return whether an environment's obs/action kinds fit the selected agent."""
+    support = AGENT_SPACE_SUPPORT.get(agent_id or "")
+    if not support or not environment_spec:
+        return False
+    observation = (environment_spec.get("observation_space") or {}).get("type")
+    action = (environment_spec.get("action_space") or {}).get("type")
+    return observation in support["observation"] and action in support["action"]
+
 # In-memory runtime keyed by Flask session id
 _RUNTIMES: dict[str, dict[str, Any]] = {}
 
@@ -134,6 +351,7 @@ def invalidate_runtime(session) -> None:
     if runtime is None:
         return
     _reset_agent_knowledge(runtime.get("agent"))
+    _close_sb3_model(runtime.get("sb3_model"))
     _close_env(runtime.get("env"))
 
 
@@ -175,7 +393,7 @@ def default_agent_filename(config: dict[str, Any] | None) -> str:
     config = config or {}
     env_id = str(config.get("environment", "environment")).replace("/", "-")
     agent_id = config.get("agent", "agent")
-    if agent_id == "drl-sb3":
+    if is_sb3_agent(agent_id):
         return f"{env_id}_{agent_id}_model.zip"
     return f"{env_id}_{agent_id}_q_table.json"
 
@@ -231,7 +449,7 @@ def export_agent(runtime: dict[str, Any]) -> tuple[bytes, str, str]:
     agent = runtime.get("agent")
     default_name = default_agent_filename(config)
 
-    if agent_id == "drl-sb3":
+    if is_sb3_agent(agent_id):
         model = runtime.get("sb3_model")
         if model is None:
             raise ValueError("No Stable-Baselines3 model is available to save.")
@@ -269,7 +487,7 @@ def _identity_from_filename(filename: str) -> dict[str, str]:
         if stem.endswith(suffix):
             stem = stem[: -len(suffix)]
             break
-    known_agents = [*TABULAR_AGENTS, "drl-sb3"]
+    known_agents = [*TABULAR_AGENTS, *SB3_AGENTS, "drl-sb3"]
     for agent_id in sorted(known_agents, key=len, reverse=True):
         marker = f"_{agent_id}"
         index = stem.find(marker)
@@ -324,7 +542,7 @@ def save_agent_to_disk(
 
     config = runtime.get("config") or {}
     agent_id = config.get("agent", "agent")
-    if agent_id == "drl-sb3":
+    if is_sb3_agent(agent_id):
         model = runtime.get("sb3_model")
         if model is None:
             raise ValueError("No Stable-Baselines3 model is available to save.")
@@ -375,7 +593,7 @@ def import_agent(runtime: dict[str, Any], content: bytes, filename: str = "") ->
     config = runtime.get("config") or {}
     agent_id = config.get("agent", "agent")
 
-    if agent_id == "drl-sb3":
+    if is_sb3_agent(agent_id):
         model = runtime.get("sb3_model")
         if model is None:
             raise ValueError("No Stable-Baselines3 model is available to load into.")
@@ -448,6 +666,7 @@ def close_all_runtimes() -> None:
     for sid in list(_RUNTIMES):
         runtime = _RUNTIMES.pop(sid, None)
         if runtime is not None:
+            _close_sb3_model(runtime.get("sb3_model"))
             _close_env(runtime.get("env"))
 
 
@@ -570,36 +789,58 @@ def create_agent(agent_name: str, env: gym.Env, config: dict):
     return TABULAR_AGENTS[agent_name](parameters)
 
 
-def get_or_create_runtime(session, config: dict, need_agent: bool = False) -> dict[str, Any]:
+def get_or_create_runtime(
+    session,
+    config: dict,
+    need_agent: bool = False,
+    sb3_model=None,
+) -> dict[str, Any]:
     sid = ensure_session_id(session)
     runtime = _RUNTIMES.get(sid)
     fingerprint = runtime_fingerprint(config, session)
+    agent_id = config.get("agent")
 
     if runtime is not None and runtime.get("fingerprint") == fingerprint:
         runtime["config"] = dict(config)
-        if need_agent and runtime.get("agent") is None:
-            runtime["agent"] = create_agent(config["agent"], runtime["env"], config)
+        if sb3_model is not None:
+            _close_sb3_model(runtime.get("sb3_model"))
+            runtime["sb3_model"] = sb3_model
+        elif need_agent:
+            if is_sb3_agent(agent_id) and runtime.get("sb3_model") is None:
+                runtime["sb3_model"] = create_sb3_model(agent_id, config)
+            elif (
+                not is_sb3_agent(agent_id)
+                and runtime.get("agent") is None
+                and agent_id in TABULAR_AGENTS
+            ):
+                runtime["agent"] = create_agent(agent_id, runtime["env"], config)
         apply_agent_hyperparameters(runtime, config)
         return runtime
 
     if runtime is not None:
         _reset_agent_knowledge(runtime.get("agent"))
+        _close_sb3_model(runtime.get("sb3_model"))
         _close_env(runtime.get("env"))
 
     env = gym.make(config["environment"], render_mode="rgb_array")
     agent = None
-    if need_agent or config["agent"] in TABULAR_AGENTS:
-        try:
-            agent = create_agent(config["agent"], env, config)
-        except ValueError:
-            if need_agent:
-                _close_env(env)
-                raise
-            agent = None
+    model = sb3_model
+    try:
+        if is_sb3_agent(agent_id):
+            if model is None:
+                model = create_sb3_model(agent_id, config)
+        elif need_agent or agent_id in TABULAR_AGENTS:
+            agent = create_agent(agent_id, env, config)
+    except Exception:
+        _close_sb3_model(model)
+        _close_env(env)
+        raise
 
     runtime = {
         "env": env,
         "agent": agent,
+        "sb3_model": model,
+        "observation": None,
         "fingerprint": fingerprint,
         "config": dict(config),
         "timestep": 0,
@@ -613,6 +854,7 @@ def reset_environment(runtime: dict[str, Any], seed: int | None = 0) -> dict:
     env = runtime["env"]
     agent = runtime.get("agent")
     observation, info = env.reset(seed=seed)
+    runtime["observation"] = observation
     if agent is not None:
         agent.restart()
         state = encode_observation(observation, env.observation_space)
@@ -631,16 +873,45 @@ def reset_environment(runtime: dict[str, Any], seed: int | None = 0) -> dict:
     }
 
 
+def _serialize_action(action, env) -> Any:
+    if isinstance(env.action_space, Discrete):
+        return int(np.asarray(action).reshape(-1)[0])
+    values = np.asarray(action, dtype=float).reshape(-1)
+    if values.size == 1:
+        return float(values[0])
+    return values.tolist()
+
+
+def _as_env_action(action, env):
+    if isinstance(env.action_space, Discrete):
+        return int(np.asarray(action).reshape(-1)[0])
+    return np.asarray(action, dtype=env.action_space.dtype)
+
+
+def _sb3_policy_action(runtime: dict[str, Any]):
+    model = runtime.get("sb3_model")
+    observation = runtime.get("observation")
+    if model is None:
+        raise ValueError("No Stable-Baselines3 model is loaded.")
+    if observation is None:
+        raise ValueError("Environment has not been initialized.")
+    epsilon = float((runtime.get("config") or {}).get("exploration_probability", 0.0))
+    action, _states = model.predict(observation, deterministic=epsilon <= 0.0)
+    return action
+
+
 def _resolve_action(runtime: dict[str, Any], action_choice: Any):
     env = runtime["env"]
     agent = runtime.get("agent")
 
     if action_choice is None or action_choice == "policy":
-        if agent is None:
-            raise ValueError("Agent policy requires a tabular agent.")
-        if not agent.states:
-            raise ValueError("Environment has not been initialized.")
-        return agent.make_decision()
+        if agent is not None:
+            if not agent.states:
+                raise ValueError("Environment has not been initialized.")
+            return agent.make_decision()
+        if runtime.get("sb3_model") is not None:
+            return _sb3_policy_action(runtime)
+        raise ValueError("Agent policy requires a configured agent.")
 
     if isinstance(env.action_space, Discrete):
         action = int(action_choice)
@@ -667,9 +938,13 @@ def run_single_action(
     """Take one environment step. Updates the Q-table only if allow_learning."""
     env = runtime["env"]
     agent = runtime.get("agent")
+    sb3_model = runtime.get("sb3_model")
+
+    if agent is None and sb3_model is None:
+        raise ValueError("Run an action requires a configured agent.")
 
     if agent is None:
-        raise ValueError("Run an action currently requires a tabular agent.")
+        return _run_single_action_sb3(runtime, action_choice)
 
     with _learning_guard(agent, allow_learning):
         # Start a fresh episode if needed or if the timestep budget was exhausted.
@@ -684,6 +959,7 @@ def run_single_action(
         observation, reward, terminated, truncated, info = env.step(action)
         done = bool(terminated or truncated)
         next_state = encode_observation(observation, env.observation_space)
+        runtime["observation"] = observation
 
         _apply_update(agent, next_state, reward, done, allow_learning)
         agent.rewards.append(reward)
@@ -706,6 +982,7 @@ def run_single_action(
         next_observation = None
         if done:
             observation, info = env.reset()
+            runtime["observation"] = observation
             agent.restart()
             state = encode_observation(observation, env.observation_space)
             agent.states.append(state)
@@ -734,6 +1011,43 @@ def run_single_action(
     return payload
 
 
+def _run_single_action_sb3(runtime: dict[str, Any], action_choice: Any) -> dict:
+    env = runtime["env"]
+    if runtime.get("observation") is None or runtime.get("timestep", 0) >= _max_timesteps(runtime):
+        reset_environment(runtime, seed=None)
+
+    action = _as_env_action(_resolve_action(runtime, action_choice), env)
+    observation, reward, terminated, truncated, info = env.step(action)
+    done = bool(terminated or truncated)
+    runtime["observation"] = observation
+    runtime["timestep"] = int(runtime.get("timestep", 0)) + 1
+    runtime["accumulated_reward"] = float(runtime.get("accumulated_reward", 0.0)) + float(
+        reward
+    )
+
+    serialized_observation = _serialize_observation(observation)
+    payload = {
+        "timestep": runtime["timestep"],
+        "max_timesteps": _max_timesteps(runtime),
+        "accumulated_reward": runtime["accumulated_reward"],
+        "reward": float(reward),
+        "done": done,
+        "action": _serialize_action(action, env),
+        "image": _frame_to_data_url(env.render()),
+        "observation": serialized_observation,
+        "q_values": None,
+        "reset_after_done": done,
+    }
+    if done:
+        observation, info = env.reset()
+        runtime["observation"] = observation
+        runtime["accumulated_reward"] = 0.0
+        payload["next_image"] = _frame_to_data_url(env.render())
+        payload["next_observation"] = _serialize_observation(observation)
+        payload["next_q_values"] = None
+    return payload
+
+
 def run_until_max_timesteps(
     runtime: dict[str, Any],
     max_timesteps: int = DEFAULT_MAX_TIMESTEPS,
@@ -749,8 +1063,10 @@ def run_until_max_timesteps(
     """
     env = runtime["env"]
     agent = runtime.get("agent")
+    if agent is None and runtime.get("sb3_model") is not None:
+        return _run_until_max_timesteps_sb3(runtime, max_timesteps, action_choice)
     if agent is None:
-        raise ValueError("No tabular agent is available for this configuration.")
+        raise ValueError("No agent is available for this configuration.")
 
     with _learning_guard(agent, allow_learning):
         initial = reset_environment(runtime, seed=None)
@@ -817,6 +1133,59 @@ def run_until_max_timesteps(
     runtime["timestep"] = max_timesteps
     runtime["accumulated_reward"] = frames[-1]["accumulated_reward"]
 
+    return {
+        "frames": frames,
+        "timestep": max_timesteps,
+        "max_timesteps": max_timesteps,
+        "accumulated_reward": frames[-1]["accumulated_reward"],
+    }
+
+
+def _run_until_max_timesteps_sb3(
+    runtime: dict[str, Any],
+    max_timesteps: int,
+    action_choice: Any,
+) -> dict:
+    env = runtime["env"]
+    initial = reset_environment(runtime, seed=None)
+    frames = [
+        {
+            "timestep": 0,
+            "accumulated_reward": 0.0,
+            "reward": 0.0,
+            "done": False,
+            "image": initial["image"],
+            "observation": initial["observation"],
+            "q_values": None,
+        }
+    ]
+    accumulated_reward = 0.0
+    for timestep in range(1, max_timesteps + 1):
+        action = _as_env_action(_resolve_action(runtime, action_choice), env)
+        observation, reward, terminated, truncated, info = env.step(action)
+        done = bool(terminated or truncated)
+        runtime["observation"] = observation
+        accumulated_reward += float(reward)
+        serialized_observation = _serialize_observation(observation)
+        frames.append(
+            {
+                "timestep": timestep,
+                "accumulated_reward": accumulated_reward,
+                "reward": float(reward),
+                "done": done,
+                "action": _serialize_action(action, env),
+                "image": _frame_to_data_url(env.render()),
+                "observation": serialized_observation,
+                "q_values": None,
+            }
+        )
+        if done:
+            observation, info = env.reset()
+            runtime["observation"] = observation
+            accumulated_reward = 0.0
+
+    runtime["timestep"] = max_timesteps
+    runtime["accumulated_reward"] = frames[-1]["accumulated_reward"]
     return {
         "frames": frames,
         "timestep": max_timesteps,
@@ -938,7 +1307,13 @@ def evaluate_greedy_episodes(
 
 
 def apply_agent_hyperparameters(runtime: dict[str, Any], config: dict) -> None:
-    """Update in-memory tabular agent hyperparameters from the active config."""
+    """Update in-memory agent hyperparameters from the active config."""
+    model = runtime.get("sb3_model")
+    if model is not None:
+        try:
+            model.learning_rate = float(config["learning_rate"])
+        except (TypeError, ValueError, AttributeError):
+            pass
     agent = runtime.get("agent")
     if agent is None:
         return
@@ -946,6 +1321,8 @@ def apply_agent_hyperparameters(runtime: dict[str, Any], config: dict) -> None:
     agent.gamma = float(config.get("discount_factor", DEFAULT_GAMMA))
     if hasattr(agent, "alpha"):
         agent.alpha = float(config["learning_rate"])
+    if getattr(agent, "parameters", None) is None:
+        return
     agent.parameters["epsilon"] = agent.epsilon
     agent.parameters["gamma"] = agent.gamma
     if "alpha" in agent.parameters:
