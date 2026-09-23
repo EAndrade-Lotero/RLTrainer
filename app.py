@@ -168,6 +168,23 @@ DEFAULT_CONFIG = {
 }
 
 
+def _policy_from_request(data: dict) -> tuple[str, float, float | None]:
+    policy = str(data.get("policy") or "epsilon").strip().lower()
+    if policy not in {"epsilon", "softmax"}:
+        policy = "epsilon"
+    try:
+        temperature = float(data.get("temperature", 1.0))
+    except (TypeError, ValueError):
+        temperature = 1.0
+    epsilon = None
+    if "exploration_probability" in data:
+        try:
+            epsilon = min(1.0, max(0.0, float(data.get("exploration_probability"))))
+        except (TypeError, ValueError):
+            epsilon = None
+    return policy, min(100.0, max(0.0, temperature)), epsilon
+
+
 def _as_bool(value, default: bool = False) -> bool:
     if value is None:
         return default
@@ -376,6 +393,7 @@ def api_environment_run_episode():
         data.get("allow_learning"),
         default=_as_bool(config.get("allow_learning")),
     )
+    policy, temperature, epsilon = _policy_from_request(data)
 
     try:
         runtime = get_or_create_runtime(session, config, need_agent=True)
@@ -384,6 +402,9 @@ def api_environment_run_episode():
             int(config.get("max_timesteps", DEFAULT_MAX_TIMESTEPS)),
             action_choice,
             allow_learning=allow_learning,
+            policy=policy,
+            temperature=temperature,
+            epsilon=epsilon,
         )
     except Exception as exc:  # noqa: BLE001 - surface Gymnasium / agent errors to the UI
         return jsonify({"error": str(exc)}), 500
@@ -401,11 +422,17 @@ def api_environment_run_action():
         data.get("allow_learning"),
         default=_as_bool(config.get("allow_learning")),
     )
+    policy, temperature, epsilon = _policy_from_request(data)
 
     try:
         runtime = get_or_create_runtime(session, config, need_agent=True)
         payload = run_single_action(
-            runtime, action_choice, allow_learning=allow_learning
+            runtime,
+            action_choice,
+            allow_learning=allow_learning,
+            policy=policy,
+            temperature=temperature,
+            epsilon=epsilon,
         )
     except Exception as exc:  # noqa: BLE001 - surface Gymnasium / agent errors to the UI
         return jsonify({"error": str(exc)}), 500
@@ -450,12 +477,22 @@ def api_agent_q_table():
 @app.route("/api/agent/analysis")
 def api_agent_analysis():
     config = get_config()
-    if config["agent"] not in {"MC", "SARSA", "Q_learning"}:
+    agent = config["agent"]
+    if is_sb3_agent(agent):
+        action_type = (
+            (ENV_SPACES.get(config["environment"]) or {})
+            .get("action_space") or {}
+        ).get("type")
+        if action_type != "discrete":
+            return jsonify(
+                {"error": "Sampling Q-values requires a discrete action space."}
+            ), 400
+    elif agent not in {"MC", "SARSA", "Q_learning"}:
         return _tabular_analysis_error()
     try:
         runtime = get_or_create_runtime(session, config, need_agent=True)
         payload = get_analysis(runtime)
-    except Exception as exc:  # noqa: BLE001 - surface agent errors to the UI
+    except Exception as exc:  # noqa: BLE001 - surface Gymnasium / agent errors to the UI
         return jsonify({"error": str(exc)}), 500
     return jsonify(_attach_experiment_labels(payload, config))
 

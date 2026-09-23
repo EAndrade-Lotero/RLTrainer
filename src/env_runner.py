@@ -6,6 +6,7 @@ import base64
 import atexit
 import io
 import json
+import random
 import secrets
 import tempfile
 from contextlib import contextmanager, nullcontext
@@ -215,7 +216,19 @@ def download_zoo_checkpoint(
     )
 
 
+def _ensure_shimmy() -> None:
+    """Zoo checkpoints store OpenAI Gym spaces; SB3 needs shimmy to read them."""
+    try:
+        import shimmy  # noqa: F401
+    except ImportError as exc:
+        raise ValueError(
+            "Zoo checkpoints use OpenAI Gym spaces. Install shimmy to load them: "
+            "pip install 'shimmy>=2.0.0'"
+        ) from exc
+
+
 def _load_sb3_checkpoint(agent_name: str, path: str):
+    _ensure_shimmy()
     algo_cls = _sb3_algo_class(agent_name)
     try:
         return algo_cls.load(path)
@@ -728,14 +741,92 @@ def encode_observation(observation, space) -> int:
     )
 
 
+def _observation_for_model(observation, space):
+    """Rebuild a Gymnasium observation from a runtime value or JSON payload."""
+    if observation is None:
+        raise ValueError("Observation is required.")
+    if isinstance(space, Discrete):
+        return int(np.asarray(observation).reshape(-1)[0])
+    if isinstance(space, Box):
+        array = np.asarray(observation, dtype=space.dtype)
+        try:
+            return array.reshape(space.shape)
+        except ValueError:
+            return array
+    return observation
+
+
+def _sb3_network_q_values(model, observation, env) -> dict | None:
+    """
+    Read per-action scores from the SB3 network for a Discrete action space.
+
+    DQN returns Q(s, ·) from `q_net`. Actor-critic policies (PPO, A2C) return
+    the categorical logits from the policy head.
+    """
+    if model is None or env is None or not isinstance(env.action_space, Discrete):
+        return None
+    policy = getattr(model, "policy", None)
+    if policy is None or not hasattr(policy, "obs_to_tensor"):
+        return None
+    try:
+        import torch
+    except ImportError:
+        return None
+
+    try:
+        obs = _observation_for_model(observation, env.observation_space)
+        obs_tensor, _ = policy.obs_to_tensor(obs)
+        with torch.no_grad():
+            q_net = getattr(policy, "q_net", None) or getattr(model, "q_net", None)
+            if q_net is not None:
+                raw = q_net(obs_tensor)
+            else:
+                distribution = policy.get_distribution(obs_tensor)
+                inner = getattr(distribution, "distribution", None)
+                raw = getattr(inner, "logits", None)
+                if raw is None:
+                    return None
+        values = np.asarray(raw.detach().cpu().numpy(), dtype=float).reshape(-1)
+    except Exception:
+        return None
+
+    n_actions = int(env.action_space.n)
+    if values.size != n_actions:
+        return None
+
+    max_q = float(np.max(values))
+    payload = {
+        "values": [float(value) for value in values],
+        "greedy_actions": [
+            int(action)
+            for action, value in enumerate(values)
+            if float(value) == max_q
+        ],
+    }
+    try:
+        payload["state_index"] = encode_observation(obs, env.observation_space)
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return payload
+
+
 def _state_q_values(runtime: dict[str, Any], observation: Any = None) -> dict | None:
-    """Return Q(s, a) for every action using the same table as /api/agent/q-table."""
+    """Return Q(s, a) for every action using the table or the SB3 network."""
     env = runtime.get("env")
+    if env is None:
+        return None
+
+    if runtime.get("sb3_model") is not None:
+        if not isinstance(env.action_space, Discrete):
+            return None
+        obs = observation if observation is not None else runtime.get("observation")
+        if obs is None:
+            return None
+        return _sb3_network_q_values(runtime["sb3_model"], obs, env)
+
     try:
         table = get_q_table(runtime)
     except ValueError:
-        return None
-    if env is None:
         return None
 
     q_table = np.asarray(table["q_table"], dtype=float)
@@ -900,18 +991,87 @@ def _sb3_policy_action(runtime: dict[str, Any]):
     return action
 
 
-def _resolve_action(runtime: dict[str, Any], action_choice: Any):
-    env = runtime["env"]
+def _sample_from_chart_policy(
+    values,
+    policy: str = "epsilon",
+    epsilon: float = 0.0,
+    temperature: float = 1.0,
+) -> int:
+    """Sample a discrete action from the policy shown on the Visualization chart."""
+    scores = np.asarray(values, dtype=float).reshape(-1)
+    n_actions = int(scores.size)
+    if n_actions < 1:
+        raise ValueError("Chart policy requires at least one action value.")
+
+    if policy == "softmax":
+        tau = max(float(temperature), 1e-8)
+        scaled = scores / tau
+        scaled = scaled - np.max(scaled)
+        probabilities = np.exp(scaled)
+        total = float(np.sum(probabilities))
+        if not np.isfinite(total) or total <= 0:
+            probabilities = np.full(n_actions, 1.0 / n_actions)
+        else:
+            probabilities = probabilities / total
+        return int(np.random.choice(n_actions, p=probabilities))
+
+    eps = min(1.0, max(0.0, float(epsilon)))
+    if np.random.uniform(0.0, 1.0) < eps:
+        return int(np.random.randint(n_actions))
+    max_q = float(np.max(scores))
+    greedy = [
+        int(action)
+        for action, value in enumerate(scores)
+        if float(value) == max_q
+    ]
+    return int(np.random.choice(greedy or [0]))
+
+
+def _chart_policy_action(
+    runtime: dict[str, Any],
+    policy: str = "epsilon",
+    temperature: float = 1.0,
+    epsilon: float | None = None,
+):
+    env = runtime.get("env")
+    if env is not None and isinstance(env.action_space, Discrete):
+        q_payload = _state_q_values(runtime, runtime.get("observation"))
+        values = (q_payload or {}).get("values") if q_payload else None
+        if values:
+            if epsilon is None:
+                epsilon = float(
+                    (runtime.get("config") or {}).get("exploration_probability", 0.0)
+                )
+            return _sample_from_chart_policy(
+                values,
+                policy=policy,
+                epsilon=epsilon,
+                temperature=temperature,
+            )
+
     agent = runtime.get("agent")
+    if agent is not None:
+        if not getattr(agent, "states", None):
+            raise ValueError("Environment has not been initialized.")
+        return agent.make_decision()
+    if runtime.get("sb3_model") is not None:
+        return _sb3_policy_action(runtime)
+    raise ValueError("Agent policy requires a configured agent.")
+
+
+def _resolve_action(
+    runtime: dict[str, Any],
+    action_choice: Any,
+    policy: str = "epsilon",
+    temperature: float = 1.0,
+    epsilon: float | None = None,
+):
+    env = runtime["env"]
 
     if action_choice is None or action_choice == "policy":
-        if agent is not None:
-            if not agent.states:
-                raise ValueError("Environment has not been initialized.")
-            return agent.make_decision()
-        if runtime.get("sb3_model") is not None:
-            return _sb3_policy_action(runtime)
-        raise ValueError("Agent policy requires a configured agent.")
+        return _chart_policy_action(
+            runtime, policy=policy, temperature=temperature, epsilon=epsilon
+        )
 
     if isinstance(env.action_space, Discrete):
         action = int(action_choice)
@@ -934,6 +1094,9 @@ def run_single_action(
     runtime: dict[str, Any],
     action_choice: Any = "policy",
     allow_learning: bool = False,
+    policy: str = "epsilon",
+    temperature: float = 1.0,
+    epsilon: float | None = None,
 ) -> dict:
     """Take one environment step. Updates the Q-table only if allow_learning."""
     env = runtime["env"]
@@ -944,14 +1107,26 @@ def run_single_action(
         raise ValueError("Run an action requires a configured agent.")
 
     if agent is None:
-        return _run_single_action_sb3(runtime, action_choice)
+        return _run_single_action_sb3(
+            runtime,
+            action_choice,
+            policy=policy,
+            temperature=temperature,
+            epsilon=epsilon,
+        )
 
     with _learning_guard(agent, allow_learning):
         # Start a fresh episode if needed or if the timestep budget was exhausted.
         if not agent.states or runtime.get("timestep", 0) >= _max_timesteps(runtime):
             reset_environment(runtime, seed=None)
 
-        action = _resolve_action(runtime, action_choice)
+        action = _resolve_action(
+            runtime,
+            action_choice,
+            policy=policy,
+            temperature=temperature,
+            epsilon=epsilon,
+        )
         agent.actions.append(
             action if isinstance(action, (int, np.integer)) else int(action)
         )
@@ -1011,12 +1186,27 @@ def run_single_action(
     return payload
 
 
-def _run_single_action_sb3(runtime: dict[str, Any], action_choice: Any) -> dict:
+def _run_single_action_sb3(
+    runtime: dict[str, Any],
+    action_choice: Any,
+    policy: str = "epsilon",
+    temperature: float = 1.0,
+    epsilon: float | None = None,
+) -> dict:
     env = runtime["env"]
     if runtime.get("observation") is None or runtime.get("timestep", 0) >= _max_timesteps(runtime):
         reset_environment(runtime, seed=None)
 
-    action = _as_env_action(_resolve_action(runtime, action_choice), env)
+    action = _as_env_action(
+        _resolve_action(
+            runtime,
+            action_choice,
+            policy=policy,
+            temperature=temperature,
+            epsilon=epsilon,
+        ),
+        env,
+    )
     observation, reward, terminated, truncated, info = env.step(action)
     done = bool(terminated or truncated)
     runtime["observation"] = observation
@@ -1035,7 +1225,7 @@ def _run_single_action_sb3(runtime: dict[str, Any], action_choice: Any) -> dict:
         "action": _serialize_action(action, env),
         "image": _frame_to_data_url(env.render()),
         "observation": serialized_observation,
-        "q_values": None,
+        "q_values": _state_q_values(runtime, observation),
         "reset_after_done": done,
     }
     if done:
@@ -1044,7 +1234,7 @@ def _run_single_action_sb3(runtime: dict[str, Any], action_choice: Any) -> dict:
         runtime["accumulated_reward"] = 0.0
         payload["next_image"] = _frame_to_data_url(env.render())
         payload["next_observation"] = _serialize_observation(observation)
-        payload["next_q_values"] = None
+        payload["next_q_values"] = _state_q_values(runtime, observation)
     return payload
 
 
@@ -1053,18 +1243,28 @@ def run_until_max_timesteps(
     max_timesteps: int = DEFAULT_MAX_TIMESTEPS,
     action_choice: Any = "policy",
     allow_learning: bool = False,
+    policy: str = "epsilon",
+    temperature: float = 1.0,
+    epsilon: float | None = None,
 ) -> dict:
     """
     Run up to max_timesteps environment steps.
 
-    Uses the selected action (or the agent policy) at every step.
+    Uses the selected action (or the chart policy) at every step.
     When an episode ends (terminated or truncated), restart the env and agent
     episode buffers. The Q-table is updated only if allow_learning is True.
     """
     env = runtime["env"]
     agent = runtime.get("agent")
     if agent is None and runtime.get("sb3_model") is not None:
-        return _run_until_max_timesteps_sb3(runtime, max_timesteps, action_choice)
+        return _run_until_max_timesteps_sb3(
+            runtime,
+            max_timesteps,
+            action_choice,
+            policy=policy,
+            temperature=temperature,
+            epsilon=epsilon,
+        )
     if agent is None:
         raise ValueError("No agent is available for this configuration.")
 
@@ -1085,7 +1285,13 @@ def run_until_max_timesteps(
         accumulated_reward = 0.0
 
         for timestep in range(1, max_timesteps + 1):
-            action = _resolve_action(runtime, action_choice)
+            action = _resolve_action(
+                runtime,
+                action_choice,
+                policy=policy,
+                temperature=temperature,
+                epsilon=epsilon,
+            )
             agent.actions.append(
                 action if isinstance(action, (int, np.integer)) else int(action)
             )
@@ -1145,6 +1351,9 @@ def _run_until_max_timesteps_sb3(
     runtime: dict[str, Any],
     max_timesteps: int,
     action_choice: Any,
+    policy: str = "epsilon",
+    temperature: float = 1.0,
+    epsilon: float | None = None,
 ) -> dict:
     env = runtime["env"]
     initial = reset_environment(runtime, seed=None)
@@ -1156,12 +1365,21 @@ def _run_until_max_timesteps_sb3(
             "done": False,
             "image": initial["image"],
             "observation": initial["observation"],
-            "q_values": None,
+            "q_values": _state_q_values(runtime, initial["observation"]),
         }
     ]
     accumulated_reward = 0.0
     for timestep in range(1, max_timesteps + 1):
-        action = _as_env_action(_resolve_action(runtime, action_choice), env)
+        action = _as_env_action(
+            _resolve_action(
+                runtime,
+                action_choice,
+                policy=policy,
+                temperature=temperature,
+                epsilon=epsilon,
+            ),
+            env,
+        )
         observation, reward, terminated, truncated, info = env.step(action)
         done = bool(terminated or truncated)
         runtime["observation"] = observation
@@ -1176,7 +1394,7 @@ def _run_until_max_timesteps_sb3(
                 "action": _serialize_action(action, env),
                 "image": _frame_to_data_url(env.render()),
                 "observation": serialized_observation,
-                "q_values": None,
+                "q_values": _state_q_values(runtime, observation),
             }
         )
         if done:
@@ -1195,15 +1413,13 @@ def _run_until_max_timesteps_sb3(
 
 
 EVALUATION_EPISODES = 10
+Q_TABLE_SAMPLE_EPISODES = 10
+Q_TABLE_SAMPLE_TIMESTEPS = 100
+Q_TABLE_SAMPLE_STATES = 10
 
 
 def get_q_table(runtime: dict[str, Any]) -> dict:
     """Serialize the tabular agent's Q-table for analysis views (read-only)."""
-    return get_analysis(runtime)
-
-
-def get_analysis(runtime: dict[str, Any]) -> dict:
-    """Serialize Q, policy, and V(s) = max_a Q(s, a) for analysis views."""
     agent = runtime.get("agent")
     if agent is None:
         raise ValueError(
@@ -1228,6 +1444,213 @@ def get_analysis(runtime: dict[str, Any]) -> dict:
         if policy.shape == q_values.shape:
             payload["policy"] = policy.tolist()
     return payload
+
+
+def _snapshot_play_cursor(runtime: dict[str, Any]) -> dict[str, Any]:
+    agent = runtime.get("agent")
+    return {
+        "observation": runtime.get("observation"),
+        "timestep": int(runtime.get("timestep", 0) or 0),
+        "accumulated_reward": float(runtime.get("accumulated_reward", 0.0) or 0.0),
+        "states": list(getattr(agent, "states", []) or []) if agent is not None else [],
+        "actions": list(getattr(agent, "actions", []) or []) if agent is not None else [],
+        "rewards": list(getattr(agent, "rewards", [np.nan]) or [np.nan])
+        if agent is not None
+        else [np.nan],
+        "dones": list(getattr(agent, "dones", [np.nan]) or [np.nan])
+        if agent is not None
+        else [np.nan],
+    }
+
+
+def _restore_play_cursor(runtime: dict[str, Any], cursor: dict[str, Any]) -> None:
+    env = runtime.get("env")
+    agent = runtime.get("agent")
+    runtime["observation"] = cursor.get("observation")
+    runtime["timestep"] = cursor.get("timestep", 0)
+    runtime["accumulated_reward"] = cursor.get("accumulated_reward", 0.0)
+    if agent is not None:
+        agent.states = list(cursor.get("states") or [])
+        agent.actions = list(cursor.get("actions") or [])
+        agent.rewards = list(cursor.get("rewards") or [np.nan])
+        agent.dones = list(cursor.get("dones") or [np.nan])
+    if env is None:
+        return
+    observation = cursor.get("observation")
+    if observation is None:
+        return
+    unwrapped = getattr(env, "unwrapped", env)
+    if hasattr(unwrapped, "s") and isinstance(env.observation_space, Discrete):
+        try:
+            unwrapped.s = int(observation)
+        except (TypeError, ValueError):
+            pass
+        return
+    if hasattr(unwrapped, "state") and isinstance(env.observation_space, Box):
+        try:
+            unwrapped.state = np.asarray(observation, dtype=float).reshape(-1)
+        except (TypeError, ValueError):
+            pass
+
+
+def _visit_key(env, observation) -> tuple:
+    try:
+        return ("idx", int(encode_observation(observation, env.observation_space)))
+    except (ValueError, TypeError, AttributeError):
+        pass
+    serialized = _serialize_observation(observation)
+    if isinstance(serialized, list):
+        flat = np.asarray(serialized, dtype=float).reshape(-1)
+        return ("vec", tuple(round(float(value), 5) for value in flat))
+    return ("raw", str(serialized))
+
+
+def _format_state_label(state, observation) -> str:
+    if state is not None:
+        return f"State {state}"
+    if isinstance(observation, list):
+        values = [float(item) for item in np.asarray(observation).reshape(-1)[:6]]
+        return "[" + ", ".join(f"{value:.2f}" for value in values) + "]"
+    return str(observation)
+
+
+def _record_visited_state(
+    visits: list[dict[str, Any]],
+    seen: set[tuple],
+    env,
+    observation,
+) -> None:
+    key = _visit_key(env, observation)
+    if key in seen:
+        return
+    seen.add(key)
+    visits.append(
+        {
+            "state": key[1] if key[0] == "idx" else None,
+            "observation": _serialize_observation(observation),
+            "image": _frame_to_data_url(env.render()),
+        }
+    )
+
+
+def _append_agent_state(runtime: dict[str, Any], observation) -> None:
+    agent = runtime.get("agent")
+    env = runtime.get("env")
+    if agent is None or env is None:
+        return
+    try:
+        agent.states.append(encode_observation(observation, env.observation_space))
+    except (ValueError, TypeError, AttributeError):
+        pass
+
+
+def sample_visited_q_states(
+    runtime: dict[str, Any],
+    n_episodes: int = Q_TABLE_SAMPLE_EPISODES,
+    max_timesteps: int = Q_TABLE_SAMPLE_TIMESTEPS,
+    n_states: int = Q_TABLE_SAMPLE_STATES,
+) -> dict[str, Any]:
+    """Collect visited states, then draw a random subset with their Q rows."""
+    env = runtime.get("env")
+    agent = runtime.get("agent")
+    if env is None or not isinstance(env.action_space, Discrete):
+        raise ValueError("Sampling Q-values requires a discrete action space.")
+    if agent is None and runtime.get("sb3_model") is None:
+        raise ValueError("Sampling Q-values requires a configured agent.")
+    if n_episodes < 1 or max_timesteps < 1 or n_states < 1:
+        raise ValueError("Q-value sampling parameters must be at least 1.")
+
+    cursor = _snapshot_play_cursor(runtime)
+    visits: list[dict[str, Any]] = []
+    seen: set[tuple] = set()
+    learning_guard = _without_learning(agent) if agent is not None else nullcontext()
+
+    try:
+        with learning_guard:
+            for _episode in range(n_episodes):
+                observation, _info = env.reset()
+                runtime["observation"] = observation
+                if agent is not None:
+                    agent.restart()
+                    _append_agent_state(runtime, observation)
+                _record_visited_state(visits, seen, env, observation)
+
+                for _step in range(max_timesteps):
+                    runtime["observation"] = observation
+                    action = _resolve_action(runtime, "policy")
+                    observation, _reward, terminated, truncated, _info = env.step(action)
+                    runtime["observation"] = observation
+                    if not bool(terminated or truncated):
+                        _append_agent_state(runtime, observation)
+                    _record_visited_state(visits, seen, env, observation)
+                    if bool(terminated or truncated):
+                        break
+    finally:
+        _restore_play_cursor(runtime, cursor)
+
+    chosen = visits
+    if len(visits) > n_states:
+        chosen = random.sample(visits, n_states)
+        chosen.sort(
+            key=lambda item: (
+                item["state"] is None,
+                item["state"] if item["state"] is not None else 0,
+            )
+        )
+
+    sampled: list[dict[str, Any]] = []
+    for item in chosen:
+        q_payload = _state_q_values(runtime, item["observation"])
+        values = (q_payload or {}).get("values") if q_payload else None
+        if not values:
+            continue
+        state = item["state"]
+        if state is None:
+            state = q_payload.get("state_index")
+        sampled.append(
+            {
+                "state": state,
+                "state_label": _format_state_label(state, item["observation"]),
+                "observation": item["observation"],
+                "image": item["image"],
+                "q_values": [float(value) for value in values],
+                "greedy_actions": list(q_payload.get("greedy_actions") or []),
+            }
+        )
+
+    return {
+        "sampled_states": sampled,
+        "visited_unique": len(visits),
+        "sample_episodes": int(n_episodes),
+        "sample_timesteps": int(max_timesteps),
+        "sample_size": len(sampled),
+    }
+
+
+def get_analysis(runtime: dict[str, Any]) -> dict:
+    """Serialize sampled Q-values, plus the tabular Q/policy/V tables when present."""
+    env = runtime.get("env")
+    agent = runtime.get("agent")
+    if agent is not None and hasattr(agent, "Q"):
+        payload = get_q_table(runtime)
+        payload.update(sample_visited_q_states(runtime))
+        return payload
+    if runtime.get("sb3_model") is not None:
+        if env is None or not isinstance(env.action_space, Discrete):
+            raise ValueError("Sampling Q-values requires a discrete action space.")
+        payload = {
+            "n_states": None,
+            "n_actions": int(env.action_space.n),
+            "q_table": [],
+            "value": [],
+            "value_definition": "V(s) = max_a Q(s, a)",
+        }
+        payload.update(sample_visited_q_states(runtime))
+        return payload
+    raise ValueError(
+        "Q-value analysis requires a tabular agent or a discrete-action "
+        "Stable-Baselines3 model."
+    )
 
 
 def evaluate_greedy_episodes(

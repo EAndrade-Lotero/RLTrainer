@@ -22,7 +22,7 @@ Abre `http://127.0.0.1:5000`.
 Pruebas:
 
 ```bash
-.\.venv\Scripts\python.exe -m unittest tests.test_visualization_no_learning tests.test_zoo_agent
+.\.venv\Scripts\python.exe -m unittest tests.test_visualization_no_learning tests.test_zoo_agent tests.test_sb3_q_values tests.test_analysis_q_sample
 ```
 
 ## Arquitectura
@@ -114,7 +114,7 @@ Prefijo `/api/*` se sirve con `Cache-Control: no-store`.
 | POST | `/api/environment/run-episode` | Episodio hasta `max_timesteps` |
 | POST | `/api/environment/run-action` | Un paso (`action`: `"policy"` o índice) |
 | GET | `/api/agent/q-table` | Matriz Q (+ `policy`, `value`, `value_definition`) del agente cacheado |
-| GET | `/api/agent/analysis` | Igual que q-table: `q_table`, `policy`, `value`, `action_labels`, `n_states`, `n_actions` |
+| GET | `/api/agent/analysis` | `sampled_states` (10 episodios × 100 timesteps, 10 estados al azar) para tabulares y SB3 Discrete; tabulares también envían `q_table` / `policy` / `value` |
 | POST | `/api/agent/evaluate` | 10 episodios greedy (`ε=0`), sin aprender. Restaura epsilon/alpha/Q. `{ rewards, mean, std, n_episodes }` |
 | GET | `/api/agent/export` | Preview de guardado (`available`, `current_filename`, `suggested_filename`, `exists`) |
 | POST | `/api/agent/export` | Guarda agente. Body: `{ "mode": "overwrite" \| "new", "filename": "..." }` |
@@ -154,13 +154,13 @@ El botón **Save agent** del context bar (todas las pestañas del workspace) usa
 
 ## Dependencias
 
-`requirements.txt`: Flask, gymnasium\[classic-control\], numpy, Pillow, stable-baselines3, huggingface_hub.
+`requirements.txt`: Flask, gymnasium\[classic-control\], numpy, Pillow, stable-baselines3, huggingface_hub, shimmy.
 
 `src/agents/deepQ.py` importa `torch`; **no está en requirements** porque esa ruta no está conectada a la app.
 
 ## Qué no está hecho / limitaciones
 
-- DRL SB3: Apply instancia un modelo sin entrenar; **Load Zoo agent** baja un checkpoint pretrained del Hub. Visualization corre episodios/acciones con `model.predict`. No hay entrenamiento SB3 en la pestaña Training.
-- Analysis: Q-table, policy (`agent.policy`), V(s)=max_a Q(s,a), y metrics (10 episodios greedy). DRL sigue sin soporte.
+- DRL SB3: Apply instancia un modelo sin entrenar; **Load Zoo agent** baja un checkpoint pretrained del Hub. Visualization corre episodios/acciones con la política del chart (ε-greedy por defecto; softmax si el chart está en Softmax) sobre los valores de la red. No hay entrenamiento SB3 en la pestaña Training.
+- Analysis: **Sampling Q-Values** muestra 10 estados visitados (10 episodios × 100 timesteps) con render y Q(s,a) para tabulares y SB3 de acción discreta. **Q-Table** (solo tabulares) muestra el arreglo Q completo. Policy, V(s) y Metrics siguen siendo tabulares.
 - Agentes en `src/agents/` distintos de TableAgents no se instancian desde Flask.
 - Runtime vive en memoria del proceso: reiniciar el servidor pierde la Q-table (salvo que se haya guardado en `saved_agents`).

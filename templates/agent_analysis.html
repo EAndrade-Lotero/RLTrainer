@@ -23,8 +23,19 @@
           type="button"
           class="analysis-tab is-active"
           role="tab"
-          id="tab-q-table"
+          id="tab-sampling"
           aria-selected="true"
+          aria-controls="panel-sampling"
+          data-analysis-tab="sampling"
+        >
+          Sampling Q-Values
+        </button>
+        <button
+          type="button"
+          class="analysis-tab"
+          role="tab"
+          id="tab-q-table"
+          aria-selected="false"
           aria-controls="panel-q-table"
           data-analysis-tab="q-table"
         >
@@ -68,20 +79,60 @@
       <div
         class="analysis-panel is-active"
         role="tabpanel"
+        id="panel-sampling"
+        aria-labelledby="tab-sampling"
+        data-analysis-panel="sampling"
+      >
+        <div class="analysis-panel__intro">
+          <h3 class="analysis-panel__title">Sampling Q-Values</h3>
+          <p class="analysis-panel__subtitle">
+            Collect states the agent visits in 10 episodes of 100 timesteps, then
+            draw 10 of those states at random. Supported for tabular agents and
+            discrete-action Stable-Baselines3 models. Each card shows the
+            environment frame and <span class="font-mono">Q(s, a)</span>.
+          </p>
+        </div>
+
+        <div id="sampling-status" class="analysis-status" role="status" aria-live="polite">
+          Sampling visited states…
+        </div>
+
+        <div class="analysis-unavailable" id="sampling-unavailable" hidden>
+          <p class="text-secondary" id="sampling-unavailable-message"></p>
+        </div>
+
+        <div class="analysis-state-shell" id="sampling-shell" hidden>
+          <div
+            class="analysis-state-scroll"
+            id="q-state-list"
+            tabindex="0"
+            aria-label="Sampled states and Q values"
+          ></div>
+        </div>
+      </div>
+
+      <div
+        class="analysis-panel"
+        role="tabpanel"
         id="panel-q-table"
         aria-labelledby="tab-q-table"
         data-analysis-panel="q-table"
+        hidden
       >
         <div class="analysis-panel__intro">
           <h3 class="analysis-panel__title">Q-Table</h3>
           <p class="analysis-panel__subtitle">
-            Action-value estimates <span class="font-mono">Q(s, a)</span> for each
-            state-action pair. Values update as the agent learns.
+            Full action-value array <span class="font-mono">Q(s, a)</span> for
+            tabular agents (MC, SARSA, Q-learning).
           </p>
         </div>
 
         <div id="q-table-status" class="analysis-status" role="status" aria-live="polite">
           Loading Q-table…
+        </div>
+
+        <div class="analysis-unavailable" id="q-table-unavailable" hidden>
+          <p class="text-secondary" id="q-table-unavailable-message"></p>
         </div>
 
         <div class="analysis-table-shell" id="q-table-shell" hidden>
@@ -249,12 +300,22 @@
     const panels = Array.from(document.querySelectorAll("[data-analysis-panel]"));
     const metricsRunButton = document.getElementById("metrics-run");
 
+    const isTabular = config.agent_family === "tabular";
+    const TABULAR_ONLY_MESSAGE =
+      "The Q-table array is available for tabular agents (MC, SARSA, Q-learning).";
+
     const views = {
+      sampling: {
+        status: document.getElementById("sampling-status"),
+        shell: document.getElementById("sampling-shell"),
+        unavailable: document.getElementById("sampling-unavailable"),
+        unavailableMessage: document.getElementById("sampling-unavailable-message"),
+      },
       "q-table": {
         status: document.getElementById("q-table-status"),
         shell: document.getElementById("q-table-shell"),
-        unavailable: null,
-        unavailableMessage: null,
+        unavailable: document.getElementById("q-table-unavailable"),
+        unavailableMessage: document.getElementById("q-table-unavailable-message"),
       },
       policy: {
         status: document.getElementById("policy-status"),
@@ -335,7 +396,30 @@
       setViewStatus(viewId, message, "error");
     }
 
+    function tabIsDisabled(tab) {
+      return tab.getAttribute("aria-disabled") === "true" || tab.disabled;
+    }
+
+    function enabledTabs() {
+      return tabs.filter((tab) => !tabIsDisabled(tab));
+    }
+
+    function syncTabularOnlyTabs() {
+      const qTableTab = document.getElementById("tab-q-table");
+      if (!qTableTab) {
+        return;
+      }
+      qTableTab.disabled = !isTabular;
+      qTableTab.setAttribute("aria-disabled", isTabular ? "false" : "true");
+      qTableTab.classList.toggle("is-disabled", !isTabular);
+      qTableTab.title = isTabular ? "" : TABULAR_ONLY_MESSAGE;
+    }
+
     function activateTab(tabId) {
+      const target = tabs.find((tab) => tab.dataset.analysisTab === tabId);
+      if (target && tabIsDisabled(target)) {
+        return;
+      }
       tabs.forEach((tab) => {
         const selected = tab.dataset.analysisTab === tabId;
         tab.classList.toggle("is-active", selected);
@@ -415,11 +499,146 @@
       });
     }
 
+    function renderQBars(container, values, greedyActions) {
+      const numbers = values.map((value) => Number(value));
+      const minValue = Math.min(0, ...numbers);
+      const maxValue = Math.max(0, ...numbers);
+      const span = Math.max(maxValue - minValue, 1e-9);
+      const zeroPercent = ((0 - minValue) / span) * 100;
+      const greedy = new Set(greedyActions || []);
+
+      container.replaceChildren();
+      numbers.forEach((value, index) => {
+        const heightPercent = (Math.abs(value) / span) * 100;
+        const isNegative = value < 0;
+        const column = document.createElement("div");
+        column.className = "q-bar";
+        if (greedy.has(index)) {
+          column.classList.add("is-greedy");
+        }
+
+        const valueLabel = document.createElement("span");
+        valueLabel.className = "q-bar__value";
+        valueLabel.textContent = formatQ(value);
+
+        const track = document.createElement("div");
+        track.className = "q-bar__track";
+
+        const zeroLine = document.createElement("div");
+        zeroLine.className = "q-bar__zero";
+        zeroLine.style.bottom = `${zeroPercent}%`;
+
+        const fill = document.createElement("div");
+        fill.className = isNegative ? "q-bar__fill is-negative" : "q-bar__fill is-positive";
+        fill.style.height = `${heightPercent}%`;
+        fill.style.bottom = isNegative
+          ? `${Math.max(zeroPercent - heightPercent, 0)}%`
+          : `${zeroPercent}%`;
+
+        const name = document.createElement("span");
+        name.className = "q-bar__label";
+        name.textContent = actionLabel(index);
+
+        track.append(zeroLine, fill);
+        column.append(valueLabel, track, name);
+        container.appendChild(column);
+      });
+    }
+
     function renderQTable(payload) {
+      const list = document.getElementById("q-state-list");
+      list.replaceChildren();
+      if (views.sampling.unavailable) {
+        views.sampling.unavailable.hidden = true;
+      }
+      const sampled = Array.isArray(payload.sampled_states) ? payload.sampled_states : [];
+
+      sampled.forEach((item, index) => {
+        const card = document.createElement("article");
+        card.className = "analysis-state-card";
+
+        const media = document.createElement("div");
+        media.className = "analysis-state-card__media";
+        if (item.image) {
+          const image = document.createElement("img");
+          image.className = "analysis-state-card__image";
+          image.src = item.image;
+          image.alt = `State ${item.state}`;
+          media.appendChild(image);
+        } else {
+          const placeholder = document.createElement("div");
+          placeholder.className = "analysis-state-card__placeholder";
+          placeholder.textContent = `State ${item.state}`;
+          media.appendChild(placeholder);
+        }
+
+        const body = document.createElement("div");
+        body.className = "analysis-state-card__body";
+
+        const title = document.createElement("h4");
+        title.className = "analysis-state-card__title";
+        title.textContent = item.state_label || (
+          item.state === null || item.state === undefined
+            ? `Sample ${index + 1}`
+            : `State ${item.state}`
+        );
+
+        const meta = document.createElement("p");
+        meta.className = "analysis-state-card__meta";
+        meta.textContent = `Sample ${index + 1} of ${sampled.length}`;
+
+        const plot = document.createElement("div");
+        plot.className = "analysis-state-card__plot";
+        plot.setAttribute("role", "img");
+        plot.setAttribute(
+          "aria-label",
+          `Q values for state ${item.state}: ${(item.q_values || [])
+            .map((value, action) => `${actionLabel(action)} ${formatQ(value)}`)
+            .join(", ")}`
+        );
+        renderQBars(plot, item.q_values || [], item.greedy_actions || []);
+
+        body.append(title, meta, plot);
+        card.append(media, body);
+        list.appendChild(card);
+      });
+
+      views.sampling.shell.hidden = sampled.length === 0;
+      const visited = payload.visited_unique ?? sampled.length;
+      const episodes = payload.sample_episodes || 10;
+      const timesteps = payload.sample_timesteps || 100;
+      if (!sampled.length) {
+        setViewStatus(
+          "sampling",
+          "The agent did not visit any states during the sampling rollouts.",
+          "error"
+        );
+        return;
+      }
+      setViewStatus(
+        "sampling",
+        `Showing ${sampled.length} of ${visited} unique states visited in ${episodes} episodes × ${timesteps} timesteps.`,
+        "info"
+      );
+    }
+
+    function renderQArray(payload) {
+      if (!isTabular) {
+        showUnavailable("q-table", TABULAR_ONLY_MESSAGE);
+        return;
+      }
+      const matrix = payload.q_table || [];
+      if (!matrix.length) {
+        showUnavailable("q-table", "The current agent does not expose a Q-table.");
+        return;
+      }
+      if (views["q-table"].unavailable) {
+        views["q-table"].unavailable.hidden = true;
+      }
       renderMatrixTable(
         "q-table",
         "q-table-body",
-        payload.q_table || [],
+        matrix,
         payload.n_actions || 0,
         "Action"
       );
@@ -432,6 +651,10 @@
     }
 
     function renderPolicy(payload) {
+      if (!isTabular) {
+        showUnavailable("policy", TABULAR_ONLY_MESSAGE);
+        return;
+      }
       const policy = payload.policy;
       if (!policy || !policy.length) {
         showUnavailable("policy", "The current agent does not expose a policy table.");
@@ -456,6 +679,10 @@
     }
 
     function renderValue(payload) {
+      if (!isTabular) {
+        showUnavailable("value", TABULAR_ONLY_MESSAGE);
+        return;
+      }
       const values = payload.value || [];
       const thead = document.querySelector("#value-table thead");
       const tableBody = document.getElementById("value-table-body");
@@ -546,10 +773,11 @@
 
     function applyAnalysisError(message) {
       analysisError = message;
-      showUnavailable("q-table", message);
-      showUnavailable("policy", message);
-      showUnavailable("value", message);
-      showUnavailable("metrics", message);
+      showUnavailable("sampling", message);
+      showUnavailable("q-table", isTabular ? message : TABULAR_ONLY_MESSAGE);
+      showUnavailable("policy", isTabular ? message : TABULAR_ONLY_MESSAGE);
+      showUnavailable("value", isTabular ? message : TABULAR_ONLY_MESSAGE);
+      showUnavailable("metrics", isTabular ? message : TABULAR_ONLY_MESSAGE);
       if (metricsRunButton) {
         metricsRunButton.disabled = true;
       }
@@ -559,10 +787,18 @@
     }
 
     async function loadAnalysis() {
-      setViewStatus("q-table", "Loading Q-table…", "info");
+      setViewStatus("sampling", "Sampling visited states…", "info");
+      setViewStatus("q-table", isTabular ? "Loading Q-table…" : TABULAR_ONLY_MESSAGE, "info");
       setViewStatus("policy", "Loading policy…", "info");
       setViewStatus("value", "Loading value function…", "info");
+      views.sampling.shell.hidden = true;
+      if (views.sampling.unavailable) {
+        views.sampling.unavailable.hidden = true;
+      }
       views["q-table"].shell.hidden = true;
+      if (views["q-table"].unavailable && isTabular) {
+        views["q-table"].unavailable.hidden = true;
+      }
       views.policy.shell.hidden = true;
       views.value.shell.hidden = true;
 
@@ -588,6 +824,7 @@
       }
       analysisPayload = data;
       renderQTable(data);
+      renderQArray(data);
       renderPolicy(data);
       renderValue(data);
     }
@@ -637,29 +874,35 @@
     }
 
     tabs.forEach((tab) => {
-      tab.addEventListener("click", () => activateTab(tab.dataset.analysisTab));
+      tab.addEventListener("click", () => {
+        if (tabIsDisabled(tab)) {
+          return;
+        }
+        activateTab(tab.dataset.analysisTab);
+      });
     });
 
     document.querySelector(".analysis-tabs").addEventListener("keydown", (event) => {
-      const currentIndex = tabs.findIndex((tab) => tab.classList.contains("is-active"));
-      if (currentIndex < 0) {
+      const available = enabledTabs();
+      const currentIndex = available.findIndex((tab) => tab.classList.contains("is-active"));
+      if (currentIndex < 0 || !available.length) {
         return;
       }
       let nextIndex = currentIndex;
       if (event.key === "ArrowRight") {
-        nextIndex = (currentIndex + 1) % tabs.length;
+        nextIndex = (currentIndex + 1) % available.length;
       } else if (event.key === "ArrowLeft") {
-        nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+        nextIndex = (currentIndex - 1 + available.length) % available.length;
       } else if (event.key === "Home") {
         nextIndex = 0;
       } else if (event.key === "End") {
-        nextIndex = tabs.length - 1;
+        nextIndex = available.length - 1;
       } else {
         return;
       }
       event.preventDefault();
-      tabs[nextIndex].focus();
-      activateTab(tabs[nextIndex].dataset.analysisTab);
+      available[nextIndex].focus();
+      activateTab(available[nextIndex].dataset.analysisTab);
     });
 
     if (metricsRunButton) {
@@ -671,9 +914,16 @@
       });
     }
 
-    activateTab("q-table");
+    syncTabularOnlyTabs();
+    if (!isTabular) {
+      showUnavailable("q-table", TABULAR_ONLY_MESSAGE);
+      showUnavailable("policy", TABULAR_ONLY_MESSAGE);
+      showUnavailable("value", TABULAR_ONLY_MESSAGE);
+      showUnavailable("metrics", TABULAR_ONLY_MESSAGE);
+    }
+    activateTab("sampling");
     loadAnalysis().catch((error) => {
-      applyAnalysisError(error.message || "Could not load Q-table.");
+      applyAnalysisError(error.message || "Could not load analysis.");
     });
   </script>
 {% endblock %}

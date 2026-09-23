@@ -52,15 +52,21 @@
       </div>
       <div class="viz-params__item" id="temperature-item" hidden>
         <label class="viz-params__label" for="config-temperature">Temperature</label>
-        <input
-          type="number"
-          id="config-temperature"
-          class="input viz-params__input"
-          value="1"
-          min="0.01"
-          max="100"
-          step="0.01"
-        >
+        <div class="viz-params__slider-row">
+          <input
+            type="range"
+            id="config-temperature"
+            class="viz-params__slider"
+            min="0"
+            max="100"
+            step="0.1"
+            value="50"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-describedby="temperature-value"
+          >
+          <span id="temperature-value" class="viz-params__slider-value font-mono">1.00</span>
+        </div>
       </div>
       <div class="viz-params__toggles">
         <label class="viz-toggle" for="allow-learning">
@@ -75,8 +81,8 @@
           <label class="viz-params__label" for="chart-mode">Chart</label>
           <select id="chart-mode" class="select viz-params__select" aria-label="Chart">
             <option value="none">Environment only</option>
-            <option value="q" selected>Q values</option>
-            <option value="epsilon">ε-greedy policy</option>
+            <option value="q">Q values</option>
+            <option value="epsilon" selected>ε-greedy policy</option>
             <option value="softmax">Softmax</option>
           </select>
         </div>
@@ -223,6 +229,9 @@
     const chartModeSelect = document.getElementById("chart-mode");
     const temperatureInput = document.getElementById("config-temperature");
     const temperatureItem = document.getElementById("temperature-item");
+    const temperatureValue = document.getElementById("temperature-value");
+    const TEMP_SLIDER_MAX = 100;
+    const TEMP_CURVE = 5;
     const learningRateInput = document.getElementById("config-lr");
     const explorationInput = document.getElementById("config-eps");
     const timestepsInput = document.getElementById("config-timesteps");
@@ -321,7 +330,7 @@
       const currentTimestep = (timestepLabel.textContent.split("/")[0] || "0").trim();
       timestepLabel.textContent = `${currentTimestep} / ${maxTimesteps}`;
       setConfigFeedback("Parameters updated.", "success");
-      qChartFromAgent(lastStateIndex);
+      applyQChart({ q_values: latestQValues });
     }
 
     function formatObservation(observation) {
@@ -415,6 +424,51 @@
       return `${(number * 100).toFixed(1)}%`;
     }
 
+    function temperatureFromSlider(position) {
+      const p = Math.min(1, Math.max(0, Number(position) / TEMP_SLIDER_MAX));
+      if (p <= 0) {
+        return 0;
+      }
+      const k = Math.exp(TEMP_CURVE);
+      return TEMP_SLIDER_MAX * (Math.exp(TEMP_CURVE * p) - 1) / (k - 1);
+    }
+
+    function sliderFromTemperature(tau) {
+      const t = Math.min(TEMP_SLIDER_MAX, Math.max(0, Number(tau) || 0));
+      if (t <= 0) {
+        return 0;
+      }
+      const k = Math.exp(TEMP_CURVE);
+      return (Math.log(1 + (t / TEMP_SLIDER_MAX) * (k - 1)) / TEMP_CURVE) * TEMP_SLIDER_MAX;
+    }
+
+    function formatTemperature(tau) {
+      const number = Number(tau);
+      if (!Number.isFinite(number) || number <= 0) {
+        return "0";
+      }
+      if (number < 0.01) {
+        return number.toExponential(1);
+      }
+      if (number < 10) {
+        return number.toFixed(2);
+      }
+      if (number < 100) {
+        return number.toFixed(1);
+      }
+      return "100";
+    }
+
+    function currentTemperature() {
+      return temperatureFromSlider(temperatureInput.value);
+    }
+
+    function syncTemperatureDisplay() {
+      const tau = currentTemperature();
+      temperatureValue.textContent = formatTemperature(tau);
+      temperatureInput.setAttribute("aria-valuetext", formatTemperature(tau));
+    }
+
     function softmax(values, temperature) {
       const tau = Math.max(Number(temperature) || 0, 1e-8);
       const scaled = values.map((value) => value / tau);
@@ -453,10 +507,15 @@
     function qChartFromAgent(stateIndex) {
       lastStateIndex = stateIndex;
       if (chartMode() === "none") {
-        renderQChart(null);
+        renderQChart(undefined);
+        qChartPanel.hidden = true;
         return;
       }
       if (!agentQTable || !Number.isInteger(stateIndex) || !agentQTable[stateIndex]) {
+        if (latestQValues && Array.isArray(latestQValues.values) && latestQValues.values.length) {
+          renderQChart(latestQValues);
+          return;
+        }
         renderQChart(null);
         return;
       }
@@ -476,6 +535,22 @@
         values: row,
         greedy_actions: greedy,
       });
+    }
+
+    function applyQChart(payload) {
+      if (payload && payload.q_values && Array.isArray(payload.q_values.values)) {
+        latestQValues = payload.q_values;
+        if (Number.isInteger(payload.q_values.state_index)) {
+          lastStateIndex = payload.q_values.state_index;
+        }
+        if (chartMode() === "none") {
+          qChartPanel.hidden = true;
+          return;
+        }
+        renderQChart(payload.q_values);
+        return;
+      }
+      qChartFromAgent(stateIndexFromPayload(payload));
     }
 
     function renderQChart(qPayload) {
@@ -515,7 +590,7 @@
         emptyMessage = "Softmax is not available for this agent or state.";
         kind = "prob";
         displayValues = qValues.length
-          ? softmax(qValues, temperatureInput.value)
+          ? softmax(qValues, currentTemperature())
           : [];
         if (displayValues.length) {
           const bestProb = Math.max(...displayValues);
@@ -595,22 +670,32 @@
       });
     }
 
+    function actionPolicyMode() {
+      return chartMode() === "softmax" ? "softmax" : "epsilon";
+    }
+
     function selectedActionPayload() {
+      const payload = {
+        allow_learning: allowLearning.checked,
+        policy: actionPolicyMode(),
+        temperature: currentTemperature(),
+        exploration_probability: Number(explorationInput.value),
+      };
       if (config.action_space && config.action_space.type === "box") {
         return {
+          ...payload,
           action: "manual",
           manual_action: continuousAction.value,
-          allow_learning: allowLearning.checked,
         };
       }
-      return { action: actionSelect.value, allow_learning: allowLearning.checked };
+      return { ...payload, action: actionSelect.value };
     }
 
     function populateActions(actionSpace) {
       actionSelect.innerHTML = "";
       const policyOption = document.createElement("option");
       policyOption.value = "policy";
-      policyOption.textContent = "Agent policy (default)";
+      policyOption.textContent = "Chart policy (default)";
       policyOption.selected = true;
       actionSelect.appendChild(policyOption);
 
@@ -685,7 +770,7 @@
       infoState.textContent = formatObservation(payload.observation);
       infoAction.textContent = formatAction(payload.action);
       infoReward.textContent = formatReward(payload.reward);
-      qChartFromAgent(stateIndexFromPayload(payload));
+      applyQChart(payload);
     }
 
     function showFrameAt(index) {
@@ -757,33 +842,6 @@
       runEpisode();
     }
 
-    function playFrames(frames) {
-      stopAnimation();
-      episodeFrames = frames;
-      frameIndex = 0;
-      setRunStatus("ready", "Ready");
-
-      function showNext() {
-        if (stopRequested) {
-          setEpisodeControls(false);
-          updateStepper();
-          return;
-        }
-        showFrameAt(frameIndex);
-        if (frameIndex < episodeFrames.length - 1) {
-          animationTimer = setTimeout(() => {
-            frameIndex += 1;
-            showNext();
-          }, FRAME_DELAY_MS);
-        } else {
-          setEpisodeControls(false);
-          setRunStatus("ready", "Ready");
-        }
-      }
-
-      showNext();
-    }
-
     async function loadInitialState() {
       setRunStatus("ready", "Ready");
       const response = await fetch("{{ url_for('api_environment_initial') }}");
@@ -806,37 +864,128 @@
       setRunStatus("ready", "Ready");
     }
 
+    function waitForFrame(signal) {
+      return new Promise((resolve, reject) => {
+        animationTimer = setTimeout(() => {
+          animationTimer = null;
+          resolve();
+        }, FRAME_DELAY_MS);
+        if (!signal) {
+          return;
+        }
+        const onAbort = () => {
+          stopAnimation();
+          reject(new DOMException("Aborted", "AbortError"));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+
+    function appendEpisodeFrame(frame) {
+      episodeFrames.push(frame);
+      frameIndex = episodeFrames.length - 1;
+      updateInfo({
+        ...frame,
+        max_timesteps: maxTimesteps,
+      });
+      showFrame(frame.image);
+      updateStepper();
+    }
+
     async function runEpisode() {
       stopRequested = false;
       stopAnimation();
       setEpisodeControls(true);
-      showMessage("Running episode…");
       setRunStatus("ready", "Ready");
 
       episodeAbort = new AbortController();
+      const signal = episodeAbort.signal;
       try {
-        const response = await fetch("{{ url_for('api_environment_run_episode') }}", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(selectedActionPayload()),
-          signal: episodeAbort.signal,
+        const initialResponse = await fetch("{{ url_for('api_environment_initial') }}", {
+          cache: "no-store",
+          signal,
         });
-        const data = await response.json();
-        if (stopRequested) {
-          return;
-        }
-        if (!response.ok) {
-          showMessage(data.error || "Could not run episode.");
+        const initial = await initialResponse.json();
+        if (!initialResponse.ok) {
+          showMessage(initial.error || "Could not start episode.");
           setRunStatus("error", "Error");
           setEpisodeControls(false);
           return;
         }
-        maxTimesteps = data.max_timesteps || maxTimesteps;
+
+        maxTimesteps = Number(timestepsInput.value) || initial.max_timesteps || maxTimesteps;
+        episodeFrames = [];
         await loadAgentQTable();
-        if (stopRequested) {
-          return;
+        appendEpisodeFrame({
+          timestep: 0,
+          accumulated_reward: 0,
+          reward: null,
+          done: false,
+          action: null,
+          image: initial.image,
+          observation: initial.observation,
+          q_values: initial.q_values,
+        });
+
+        const horizon = maxTimesteps;
+        for (let step = 0; step < horizon; step += 1) {
+          if (stopRequested) {
+            break;
+          }
+          await waitForFrame(signal);
+          if (stopRequested) {
+            break;
+          }
+
+          const response = await fetch("{{ url_for('api_environment_run_action') }}", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(selectedActionPayload()),
+            signal,
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            showMessage(data.error || "Could not run episode.");
+            setRunStatus("error", "Error");
+            setEpisodeControls(false);
+            return;
+          }
+
+          maxTimesteps = data.max_timesteps || maxTimesteps;
+          if (allowLearning.checked) {
+            await loadAgentQTable();
+          }
+          appendEpisodeFrame({
+            timestep: data.timestep,
+            accumulated_reward: data.accumulated_reward,
+            reward: data.reward,
+            done: data.done,
+            action: data.action,
+            image: data.image,
+            observation: data.observation,
+            q_values: data.q_values,
+          });
+
+          if (data.reset_after_done && data.next_image) {
+            await waitForFrame(signal);
+            if (allowLearning.checked) {
+              await loadAgentQTable();
+            }
+            appendEpisodeFrame({
+              timestep: data.timestep,
+              accumulated_reward: 0,
+              reward: null,
+              done: false,
+              action: null,
+              image: data.next_image,
+              observation: data.next_observation,
+              q_values: data.next_q_values,
+            });
+          }
         }
-        playFrames(data.frames);
+
+        setEpisodeControls(false);
+        setRunStatus("ready", "Ready");
       } catch (error) {
         if (error && error.name === "AbortError") {
           return;
@@ -899,12 +1048,15 @@
 
     populateActions(config.action_space);
     if (config.agent_family === "sb3") {
-      chartModeSelect.value = "none";
-      qChartEmpty.textContent =
-        "Q values are for tabular agents. This view shows the Stable-Baselines3 policy acting in the environment.";
       const learningToggle = allowLearning.closest(".viz-toggle");
       if (learningToggle) {
         learningToggle.hidden = true;
+      }
+      const discreteActions = config.action_space && config.action_space.type === "discrete";
+      if (!discreteActions) {
+        chartModeSelect.value = "none";
+        qChartEmpty.textContent =
+          "Q values are available for discrete-action Stable-Baselines3 agents.";
       }
     }
     runEpisodeButton.addEventListener("click", onEpisodeButtonClick);
@@ -913,22 +1065,25 @@
     nextFrameButton.addEventListener("click", () => showFrameAt(frameIndex + 1));
     chartModeSelect.addEventListener("change", () => {
       syncTemperatureField();
-      qChartFromAgent(lastStateIndex);
+      applyQChart({ q_values: latestQValues });
     });
     temperatureInput.addEventListener("input", () => {
+      syncTemperatureDisplay();
       if (chartMode() === "softmax") {
-        qChartFromAgent(lastStateIndex);
+        applyQChart({ q_values: latestQValues });
       }
     });
     explorationInput.addEventListener("input", () => {
       if (chartMode() === "epsilon") {
-        qChartFromAgent(lastStateIndex);
+        applyQChart({ q_values: latestQValues });
       }
     });
     allowLearning.addEventListener("change", saveHyperparameters);
     learningRateInput.addEventListener("change", saveHyperparameters);
     explorationInput.addEventListener("change", saveHyperparameters);
     timestepsInput.addEventListener("change", saveHyperparameters);
+    temperatureInput.value = String(sliderFromTemperature(1));
+    syncTemperatureDisplay();
     syncTemperatureField();
     loadInitialState();
   </script>
